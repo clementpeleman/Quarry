@@ -3,6 +3,8 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 type PositionCallback = (nodeId: string, position: { x: number; y: number }) => void;
 type EdgeCallback = (edge: any) => void;
 type PreviewCallback = (nodeId: string, preview: any) => void;
+type NodeCallback = (node: any) => void;
+type TextCallback = (nodeId: string, text: string) => void;
 
 export function useYjs(roomId: string | null) {
   const [isSynced, setIsSynced] = useState(false);
@@ -11,6 +13,8 @@ export function useYjs(roomId: string | null) {
   const positionCallbackRef = useRef<PositionCallback | null>(null);
   const edgeCallbackRef = useRef<EdgeCallback | null>(null);
   const previewCallbackRef = useRef<PreviewCallback | null>(null);
+  const nodeCallbackRef = useRef<NodeCallback | null>(null);
+  const textCallbackRef = useRef<TextCallback | null>(null);
 
   useEffect(() => {
     if (!roomId) {
@@ -37,6 +41,10 @@ export function useYjs(roomId: string | null) {
           edgeCallbackRef.current(msg.edge);
         } else if (msg.type === 'preview' && previewCallbackRef.current) {
           previewCallbackRef.current(msg.nodeId, msg.preview);
+        } else if (msg.type === 'node' && nodeCallbackRef.current) {
+          nodeCallbackRef.current(msg.node);
+        } else if (msg.type === 'text' && textCallbackRef.current) {
+          textCallbackRef.current(msg.nodeId, msg.text);
         } else if (msg.type === 'users') {
           setUsers(msg.count);
         }
@@ -78,7 +86,6 @@ export function useYjs(roomId: string | null) {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       try {
-        // Custom replacer to handle BigInt and other non-serializable types
         const safeStringify = (obj: any) => JSON.stringify(obj, (_, value) =>
           typeof value === 'bigint' ? value.toString() : value
         );
@@ -86,6 +93,20 @@ export function useYjs(roomId: string | null) {
       } catch (e) {
         console.warn('Failed to sync preview:', e);
       }
+    }
+  }, []);
+
+  const syncNode = useCallback((node: any) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'node', node }));
+    }
+  }, []);
+
+  const syncText = useCallback((nodeId: string, text: string) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'text', nodeId, text }));
     }
   }, []);
 
@@ -104,14 +125,29 @@ export function useYjs(roomId: string | null) {
     return () => { previewCallbackRef.current = null; };
   }, []);
 
+  const onRemoteNodeChange = useCallback((callback: NodeCallback) => {
+    nodeCallbackRef.current = callback;
+    return () => { nodeCallbackRef.current = null; };
+  }, []);
+
+  const onRemoteTextChange = useCallback((callback: TextCallback) => {
+    textCallbackRef.current = callback;
+    return () => { textCallbackRef.current = null; };
+  }, []);
+
   return { 
     isSynced,
     users,
     syncPosition,
     syncEdge,
     syncPreview,
+    syncNode,
+    syncText,
     onRemotePositionChange,
     onRemoteEdgeChange,
-    onRemotePreviewChange
+    onRemotePreviewChange,
+    onRemoteNodeChange,
+    onRemoteTextChange
   };
 }
+

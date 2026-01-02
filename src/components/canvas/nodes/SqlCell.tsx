@@ -10,8 +10,9 @@ interface SqlCellData {
   results: unknown;
   isExecuting: boolean;
   onRun?: (sql: string) => Promise<void>;
+  onTextChange?: (text: string) => void;
   error?: string;
-  preview?: { columns: string[]; rows: unknown[][]; totalRows: number }; // Synced preview from collaborators
+  preview?: { columns: string[]; rows: unknown[][]; totalRows: number };
 }
 
 function SqlCell({ data, id, selected }: NodeProps) {
@@ -25,6 +26,14 @@ function SqlCell({ data, id, selected }: NodeProps) {
   
   const [internalError, setInternalError] = useState<string | null>(null);
   const editorRef = useRef<unknown>(null);
+  const syncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Sync incoming SQL changes from collaborators
+  useEffect(() => {
+    if (cellData.sql !== undefined && cellData.sql !== sql) {
+      setSql(cellData.sql);
+    }
+  }, [cellData.sql]);
 
   const handleEditorMount: OnMount = (editor) => {
     editorRef.current = editor;
@@ -94,7 +103,16 @@ function SqlCell({ data, id, selected }: NodeProps) {
           language="sql"
           theme="vs-dark"
           value={sql}
-          onChange={(value) => setSql(value || '')}
+          onChange={(value) => {
+            setSql(value || '');
+            // Debounced sync to collaborators
+            if (cellData.onTextChange) {
+              if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+              syncTimeoutRef.current = setTimeout(() => {
+                cellData.onTextChange!(value || '');
+              }, 300);
+            }
+          }}
           onMount={handleEditorMount}
           options={{
             minimap: { enabled: false },

@@ -34,7 +34,7 @@ wss.on('connection', (ws, req) => {
     try {
       const msg = JSON.parse(message.toString());
       
-      if (msg.type === 'position' || msg.type === 'edge' || msg.type === 'preview') {
+      if (msg.type === 'position' || msg.type === 'edge' || msg.type === 'preview' || msg.type === 'node' || msg.type === 'text') {
         // Broadcast to all other clients in the room
         rooms.get(roomName)?.forEach((client) => {
           if (client !== ws && client.readyState === 1) {

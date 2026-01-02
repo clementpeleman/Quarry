@@ -80,16 +80,20 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
 
-  // Collab State - for position, edge, and preview syncing
+  // Collab State - for position, edge, preview, node, and text syncing
   const { 
       isSynced,
       users,
       syncPosition,
       syncEdge,
       syncPreview,
+      syncNode,
+      syncText,
       onRemotePositionChange,
       onRemoteEdgeChange,
-      onRemotePreviewChange
+      onRemotePreviewChange,
+      onRemoteNodeChange,
+      onRemoteTextChange
   } = useYjs(isCollab ? (canvasId || 'default') : null);
 
   const { getNodes } = useReactFlow();
@@ -146,6 +150,33 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
     
     return unsubscribe;
   }, [isCollab, isSynced, onRemotePreviewChange, setNodes]);
+
+  // Listen for remote node additions
+  useEffect(() => {
+    if (!isCollab || !isSynced || !onRemoteNodeChange) return;
+    
+    const unsubscribe = onRemoteNodeChange((node: any) => {
+      setNodes((nds) => {
+        if (nds.find(n => n.id === node.id)) return nds;
+        return [...nds, node];
+      });
+    });
+    
+    return unsubscribe;
+  }, [isCollab, isSynced, onRemoteNodeChange, setNodes]);
+
+  // Listen for remote text changes
+  useEffect(() => {
+    if (!isCollab || !isSynced || !onRemoteTextChange) return;
+    
+    const unsubscribe = onRemoteTextChange((nodeId: string, text: string) => {
+      setNodes((nds) => 
+        nds.map(n => n.id === nodeId ? { ...n, data: { ...n.data, sql: text } } : n)
+      );
+    });
+    
+    return unsubscribe;
+  }, [isCollab, isSynced, onRemoteTextChange, setNodes]);
 
   const onConnect: OnConnect = useCallback(
     (connection) => {
@@ -224,7 +255,7 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
     }
   }, [getNodes, updateNodeData, isCollab, isSynced, syncPreview]);
 
-  // Inject callback into nodes
+  // Inject callbacks into nodes
   const nodesWithCallback = useMemo(() => {
     return nodes.map(node => {
       if (node.type === 'sqlCell' || node.type === 'chartCell') {
@@ -233,12 +264,15 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
           data: {
             ...node.data,
             onRun: (sql: string) => handleRunQuery(node.id, sql),
+            onTextChange: isCollab && isSynced && syncText 
+              ? (text: string) => syncText(node.id, text) 
+              : undefined,
           },
         };
       }
       return node;
     });
-  }, [nodes, handleRunQuery]);
+  }, [nodes, handleRunQuery, isCollab, isSynced, syncText]);
 
   // Add new node
   const handleAddNode = useCallback((type: 'sqlCell' | 'textCell' | 'chartCell') => {
@@ -253,7 +287,12 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
         : { label: 'New Note', content: '# Title\n\nWrite your notes here...' },
     };
     setNodes((nds) => [...nds, newNode]);
-  }, [setNodes]);
+    
+    // Sync new node to collaborators
+    if (isCollab && isSynced && syncNode) {
+      syncNode(newNode);
+    }
+  }, [setNodes, isCollab, isSynced, syncNode]);
 
   // Handle file upload
   const handleFileUpload = useCallback(async (file: File) => {
