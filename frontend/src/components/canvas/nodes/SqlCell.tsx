@@ -1,7 +1,7 @@
 'use client';
 
 import { memo, useState, useCallback, useRef, useEffect } from 'react';
-import { Handle, Position, type NodeProps } from '@xyflow/react';
+import { Handle, Position, NodeResizer, type NodeProps } from '@xyflow/react';
 import Editor, { type OnMount, type Monaco } from '@monaco-editor/react';
 import { duckDB } from '@/lib/query/DuckDBEngine';
 
@@ -14,6 +14,8 @@ interface SqlCellData {
   onTextChange?: (text: string) => void;
   error?: string;
   preview?: { columns: string[]; rows: unknown[][]; totalRows: number };
+  width?: number;
+  height?: number;
 }
 
 function SqlCell({ data, id, selected }: NodeProps) {
@@ -123,12 +125,20 @@ function SqlCell({ data, id, selected }: NodeProps) {
   return (
     <div
       className={`
-        min-w-[400px] max-w-[600px]
+        min-w-[350px] min-h-[200px]
         bg-zinc-900 rounded-xl border-2 shadow-2xl
         transition-all duration-200
         ${selected ? 'border-indigo-500 shadow-indigo-500/20' : 'border-zinc-700'}
       `}
+      style={{ width: cellData.width || 450, height: cellData.height || 'auto' }}
     >
+      <NodeResizer 
+        minWidth={350} 
+        minHeight={200}
+        isVisible={selected}
+        lineClassName="!border-indigo-500"
+        handleClassName="!w-2 !h-2 !bg-indigo-500 !border-0"
+      />
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 bg-zinc-800/50 rounded-t-xl border-b border-zinc-700">
         <div className="flex items-center gap-2">

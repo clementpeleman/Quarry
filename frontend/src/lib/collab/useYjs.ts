@@ -68,7 +68,14 @@ export function useYjs(roomId: string | null) {
     };
   }, [roomId]);
 
+  const lastPositionSyncRef = useRef<number>(0);
+
   const syncPosition = useCallback((nodeId: string, position: { x: number; y: number }) => {
+    const now = Date.now();
+    // Throttle to max 5 times per second (200ms)
+    if (now - lastPositionSyncRef.current < 200) return;
+    lastPositionSyncRef.current = now;
+
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'position', nodeId, position }));

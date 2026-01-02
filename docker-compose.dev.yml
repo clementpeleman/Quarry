@@ -1,0 +1,71 @@
+# Development docker-compose with hot reload
+services:
+  # PostgreSQL database
+  db:
+    image: postgres:16-alpine
+    container_name: quarry-db
+    environment:
+      POSTGRES_USER: quarry
+      POSTGRES_PASSWORD: quarry_secret
+      POSTGRES_DB: quarry
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quarry"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Backend API with hot reload
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: quarry-backend
+    environment:
+      DATABASE_URL: postgresql://quarry:quarry_secret@db:5432/quarry
+      PORT: 4000
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/package.json:/app/package.json
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Frontend with hot reload
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: quarry-frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:4000
+      NEXT_PUBLIC_WS_URL: ws://localhost:1234
+      WATCHPACK_POLLING: "true"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    depends_on:
+      - backend
+
+  # WebSocket collaboration server
+  collab:
+    build:
+      context: ./collab
+      dockerfile: Dockerfile
+    container_name: quarry-collab
+    environment:
+      PORT: 1234
+    ports:
+      - "1234:1234"
+
+volumes:
+  postgres_data:

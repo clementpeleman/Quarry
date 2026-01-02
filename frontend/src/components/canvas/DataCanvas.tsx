@@ -26,6 +26,7 @@ import TextCell from './nodes/TextCell';
 import ChartCell from './nodes/ChartCell';
 import CanvasMenu from './CanvasMenu';
 import SchemaBrowser from './SchemaBrowser';
+import ColumnMappingModal from './ColumnMappingModal';
 import { loadCSVFile, loadParquetFile } from '@/lib/connectors/drivers/duckdb';
 
 const nodeTypes: NodeTypes = {
@@ -84,6 +85,12 @@ interface DataCanvasProps {
 function DataCanvasContent({ canvasId }: DataCanvasProps) {
   const [isCollab, setIsCollab] = useState(false);
   const [isSchemaOpen, setIsSchemaOpen] = useState(false);
+  const [pendingConnection, setPendingConnection] = useState<{
+    sourceId: string;
+    targetId: string;
+    columns: string[];
+    chartType: 'bar' | 'line' | 'pie' | 'bigNumber';
+  } | null>(null);
   
   // Always use local state for nodes/edges (source of truth for data)
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
@@ -189,6 +196,27 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
 
   const onConnect: OnConnect = useCallback(
     (connection) => {
+      const sourceNode = nodes.find(n => n.id === connection.source);
+      const targetNode = nodes.find(n => n.id === connection.target);
+      
+      // If connecting SQL → Chart and SQL has results, show column mapping modal
+      if (
+        sourceNode?.type === 'sqlCell' && 
+        targetNode?.type === 'chartCell' &&
+        sourceNode.data.results
+      ) {
+        const results = sourceNode.data.results as { columns: string[]; rows: unknown[][] };
+        if (results.columns.length > 0) {
+          setPendingConnection({
+            sourceId: connection.source!,
+            targetId: connection.target!,
+            columns: results.columns,
+            chartType: (targetNode.data as any).chartType || 'bar',
+          });
+          return; // Don't create edge yet, wait for modal
+        }
+      }
+      
       const newEdge = { 
         ...connection, 
         id: `e${Date.now()}`,
@@ -202,7 +230,7 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
         syncEdge(newEdge);
       }
     },
-    [setEdges, isCollab, isSynced, syncEdge]
+    [nodes, setEdges, isCollab, isSynced, syncEdge]
   );
   
   // Helper to update node data
@@ -248,6 +276,22 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
       const result = await duckDB.query(executableSql);
       updateNodeData(nodeId, { results: result, isExecuting: false });
       
+      // Auto-update connected chart nodes
+      const connectedCharts = edges
+        .filter(e => e.source === nodeId)
+        .map(e => nodes.find(n => n.id === e.target))
+        .filter(n => n?.type === 'chartCell');
+      
+      connectedCharts.forEach(chartNode => {
+        if (chartNode) {
+          setNodes(nds => nds.map(n => 
+            n.id === chartNode.id 
+              ? { ...n, data: { ...n.data, results: result } }
+              : n
+          ));
+        }
+      });
+      
       // Sync preview (first 5 rows) to collaborators
       if (isCollab && isSynced && syncPreview && result.rows) {
         const preview = {
@@ -262,7 +306,7 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
       console.error(error);
       updateNodeData(nodeId, { isExecuting: false, error: (error as Error).message });
     }
-  }, [getNodes, updateNodeData, isCollab, isSynced, syncPreview]);
+  }, [getNodes, updateNodeData, isCollab, isSynced, syncPreview, edges, nodes, setNodes]);
 
   // Inject callbacks into nodes
   const nodesWithCallback = useMemo(() => {
@@ -326,6 +370,43 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
     }
   }, []);
 
+  // Handle column mapping selection
+  const handleColumnMappingSave = useCallback((mapping: { xColumn: string; yColumn: string }) => {
+    if (!pendingConnection) return;
+    
+    const sourceNode = nodes.find(n => n.id === pendingConnection.sourceId);
+    if (!sourceNode || !sourceNode.data.results) return;
+    
+    // Update chart node with results and column mapping
+    setNodes(nds => nds.map(n => {
+      if (n.id === pendingConnection.targetId) {
+        return {
+          ...n,
+          data: {
+            ...n.data,
+            results: sourceNode.data.results,
+            columnMapping: mapping,
+            sourceNodeId: pendingConnection.sourceId,
+          }
+        };
+      }
+      return n;
+    }));
+    
+    // Create the edge
+    const newEdge = {
+      id: `e${Date.now()}`,
+      source: pendingConnection.sourceId,
+      target: pendingConnection.targetId,
+      sourceHandle: null,
+      targetHandle: null,
+    };
+    setEdges(eds => addEdge(newEdge, eds as any));
+    
+    // Close modal
+    setPendingConnection(null);
+  }, [pendingConnection, nodes, setNodes, setEdges]);
+
   return (
     <div className="w-full h-full bg-zinc-950 relative">
       {/* Menu */}
@@ -388,6 +469,16 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
           className="bg-zinc-900 border-zinc-800"
         />
       </ReactFlow>
+
+      {/* Column Mapping Modal */}
+      {pendingConnection && (
+        <ColumnMappingModal
+          columns={pendingConnection.columns}
+          chartType={pendingConnection.chartType}
+          onSave={handleColumnMappingSave}
+          onClose={() => setPendingConnection(null)}
+        />
+      )}
     </div>
   );
 }

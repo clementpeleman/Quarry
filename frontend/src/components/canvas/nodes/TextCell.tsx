@@ -1,11 +1,13 @@
 'use client';
 
 import { memo, useState } from 'react';
-import { Handle, Position, type NodeProps } from '@xyflow/react';
+import { Handle, Position, NodeResizer, type NodeProps } from '@xyflow/react';
 
 interface TextCellData {
   label: string;
   content: string;
+  width?: number;
+  height?: number;
 }
 
 function TextCell({ data, selected }: NodeProps) {
@@ -53,12 +55,20 @@ function TextCell({ data, selected }: NodeProps) {
   return (
     <div
       className={`
-        min-w-[300px] max-w-[400px]
+        min-w-[250px] min-h-[150px]
         bg-zinc-900/90 backdrop-blur-sm rounded-xl border-2 shadow-xl
         transition-all duration-200
         ${selected ? 'border-emerald-500 shadow-emerald-500/20' : 'border-zinc-700'}
       `}
+      style={{ width: cellData.width || 350, height: cellData.height || 'auto' }}
     >
+      <NodeResizer 
+        minWidth={250} 
+        minHeight={150}
+        isVisible={selected}
+        lineClassName="!border-emerald-500"
+        handleClassName="!w-2 !h-2 !bg-emerald-500 !border-0"
+      />
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 bg-zinc-800/50 rounded-t-xl border-b border-zinc-700">
         <div className="flex items-center gap-2">

@@ -1,7 +1,7 @@
 'use client';
 
 import { memo, useMemo, useState, useCallback } from 'react';
-import { Handle, Position, type NodeProps } from '@xyflow/react';
+import { Handle, Position, NodeResizer, type NodeProps } from '@xyflow/react';
 import ReactECharts from 'echarts-for-react';
 
 interface ChartCellData {
@@ -11,15 +11,23 @@ interface ChartCellData {
   results?: {
     columns: string[];
     rows: any[][];
-  }; // Query results
-  data?: { // Fallback static data
+  };
+  data?: {
     labels?: string[];
     values?: number[];
     value?: number | string;
     title?: string;
   };
+  // Column mapping from connected SQL cell
+  columnMapping?: {
+    xColumn: string;
+    yColumn: string;
+  };
+  sourceNodeId?: string;
   onRun?: (sql: string) => Promise<void>;
   isExecuting?: boolean;
+  width?: number;
+  height?: number;
 }
 
 function ChartCell({ data, selected }: NodeProps) {
@@ -30,22 +38,37 @@ function ChartCell({ data, selected }: NodeProps) {
   // Process data from results or static data
   const processedData = useMemo(() => {
     if (cellData.results && cellData.results.rows.length > 0) {
-      // Auto-detect: First column is X (category), Second is Y (value)
       const rows = cellData.results.rows;
+      const columns = cellData.results.columns;
+      
+      // Use column mapping if available
+      if (cellData.columnMapping) {
+        const xIndex = columns.indexOf(cellData.columnMapping.xColumn);
+        const yIndex = columns.indexOf(cellData.columnMapping.yColumn);
+        if (xIndex !== -1 && yIndex !== -1) {
+          return {
+            labels: rows.map(r => String(r[xIndex])),
+            values: rows.map(r => Number(r[yIndex])),
+            value: rows[0][yIndex],
+            title: cellData.columnMapping.yColumn
+          };
+        }
+      }
+      
+      // Auto-detect: First column is X, Second is Y
       return {
         labels: rows.map(r => String(r[0])),
         values: rows.map(r => Number(r[1])),
-        value: rows[0][0], // For BigNumber
-        title: cellData.results.columns[0] // For BigNumber title
+        value: rows[0][0],
+        title: columns[0]
       };
     }
-    // Fallback
     return cellData.data || {
       labels: ['A', 'B', 'C'],
       values: [10, 20, 30],
       value: 0,
     };
-  }, [cellData.results, cellData.data]);
+  }, [cellData.results, cellData.data, cellData.columnMapping]);
 
   const handleRun = useCallback(() => {
     if (cellData.onRun) {
@@ -88,12 +111,20 @@ function ChartCell({ data, selected }: NodeProps) {
   return (
     <div
       className={`
-        min-w-[350px]
+        min-w-[300px] min-h-[250px]
         bg-zinc-900/90 backdrop-blur-sm rounded-xl border-2 shadow-xl
         transition-all duration-200
         ${selected ? 'border-violet-500 shadow-violet-500/20' : 'border-zinc-700'}
       `}
+      style={{ width: cellData.width || 380, height: cellData.height || 'auto' }}
     >
+      <NodeResizer 
+        minWidth={300} 
+        minHeight={250}
+        isVisible={selected}
+        lineClassName="!border-violet-500"
+        handleClassName="!w-2 !h-2 !bg-violet-500 !border-0"
+      />
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 bg-zinc-800/50 rounded-t-xl border-b border-zinc-700">
         <div className="flex items-center gap-2">
