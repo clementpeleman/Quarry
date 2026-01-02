@@ -1,36 +1,118 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Quarry
 
-## Getting Started
+**Open Source Canvas-Based Business Intelligence Platform**
 
-First, run the development server:
+A modern data exploration tool that combines the power of SQL with an infinite canvas interface. Query your data, visualize results, and collaborate in real-time.
+
+---
+
+## Features
+
+- **Canvas-Based Interface** - Drag-and-drop SQL cells, charts, and notes on an infinite canvas
+- **In-Browser SQL Engine** - Powered by DuckDB WASM for instant client-side query execution
+- **Real-Time Collaboration** - Work together with live cursors, synced queries, and shared results
+- **Cell Chaining** - Reference results from other cells using `{{cell_id}}` syntax
+- **Visualizations** - Built-in charting with bar, line, pie, and big number displays
+- **Multiple Data Sources** - Connect to PostgreSQL, upload CSV/Parquet files, or query in-memory data
+
+## Quick Start
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# Install dependencies
+npm install
+
+# Run development server with collaboration support
+npm run dev:all
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000/canvas](http://localhost:3000/canvas) to start exploring.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Architecture
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         Browser                              │
+│  ┌────────────────┐  ┌────────────────┐  ┌───────────────┐  │
+│  │   SQL Cell     │  │   Text Cell    │  │  Chart Cell   │  │
+│  └───────┬────────┘  └───────┬────────┘  └───────┬───────┘  │
+│          └───────────────────┼───────────────────┘          │
+│                              ▼                              │
+│                    ┌─────────────────┐                      │
+│                    │   DataCanvas    │                      │
+│                    │ (React Flow)    │                      │
+│                    └────────┬────────┘                      │
+│          ┌──────────────────┼──────────────────┐            │
+│          ▼                  ▼                  ▼            │
+│  ┌───────────────┐  ┌──────────────┐  ┌────────────────┐   │
+│  │ DuckDB WASM   │  │  WebSocket   │  │  Local State   │   │
+│  │ (SQL Engine)  │  │  (Collab)    │  │  (React)       │   │
+│  └───────────────┘  └──────────────┘  └────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
 
-## Learn More
+## Scripts
 
-To learn more about Next.js, take a look at the following resources:
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Start Next.js development server |
+| `npm run collab` | Start WebSocket collaboration server |
+| `npm run dev:all` | Start both servers concurrently |
+| `npm run build` | Build for production |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Project Structure
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```
+src/
+├── app/
+│   ├── canvas/           # Canvas page
+│   ├── settings/         # Settings page
+│   └── api/connectors/   # Database connector API routes
+├── components/canvas/
+│   ├── DataCanvas.tsx    # Main canvas orchestrator
+│   ├── CanvasMenu.tsx    # Top menu bar
+│   └── nodes/            # Cell components (SQL, Text, Chart)
+└── lib/
+    ├── connectors/       # Database driver framework
+    ├── collab/           # Collaboration hooks
+    └── query/            # DuckDB WASM wrapper
 
-## Deploy on Vercel
+server/
+└── websocket.mjs         # Collaboration WebSocket server
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Database Connectors
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Quarry uses a driver-based architecture inspired by Metabase:
+
+| Driver | Status | Execution |
+|--------|--------|-----------|
+| DuckDB WASM | Ready | Client-side |
+| PostgreSQL | Ready | Server-side (API route) |
+| CSV/Parquet Upload | Ready | Client-side |
+
+## Collaboration
+
+Enable real-time collaboration by clicking "Go Live" in the canvas. Features include:
+
+- Node position syncing
+- Edge/connection syncing
+- SQL text syncing (debounced)
+- Query result previews (first 5 rows)
+- New node syncing
+
+## Technology Stack
+
+- **Framework**: Next.js 15
+- **Canvas**: React Flow
+- **SQL Engine**: DuckDB WASM
+- **Collaboration**: WebSocket + Custom Protocol
+- **Charts**: ECharts
+- **Editor**: Monaco Editor
+
+## License
+
+AGPL-3.0
+
+---
+
+For detailed technical documentation, see [ARCHITECTURE.md](./ARCHITECTURE.md).
