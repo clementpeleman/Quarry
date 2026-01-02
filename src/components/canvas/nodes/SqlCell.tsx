@@ -2,7 +2,8 @@
 
 import { memo, useState, useCallback, useRef, useEffect } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import Editor, { type OnMount } from '@monaco-editor/react';
+import Editor, { type OnMount, type Monaco } from '@monaco-editor/react';
+import { duckDB } from '@/lib/query/DuckDBEngine';
 
 interface SqlCellData {
   label: string;
@@ -35,8 +36,73 @@ function SqlCell({ data, id, selected }: NodeProps) {
     }
   }, [cellData.sql]);
 
-  const handleEditorMount: OnMount = (editor) => {
+  const handleEditorMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
+    
+    // Register SQL autocomplete provider
+    monaco.languages.registerCompletionItemProvider('sql', {
+      provideCompletionItems: async (model: Parameters<typeof monaco.editor.IStandaloneCodeEditor>[0] extends infer T ? T : never, position: { lineNumber: number; column: number }) => {
+        const word = model.getWordUntilPosition(position);
+        const range = {
+          startLineNumber: position.lineNumber,
+          endLineNumber: position.lineNumber,
+          startColumn: word.startColumn,
+          endColumn: word.endColumn,
+        };
+
+        const suggestions: any[] = [];
+
+        try {
+          // Get tables
+          const tables = await duckDB.query(`
+            SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'
+          `);
+          tables.rows.forEach(row => {
+            suggestions.push({
+              label: row[0] as string,
+              kind: monaco.languages.CompletionItemKind.Class,
+              insertText: row[0] as string,
+              detail: 'Table',
+              range,
+            });
+          });
+
+          // Get columns
+          const columns = await duckDB.query(`
+            SELECT DISTINCT column_name, data_type FROM information_schema.columns
+          `);
+          columns.rows.forEach(row => {
+            suggestions.push({
+              label: row[0] as string,
+              kind: monaco.languages.CompletionItemKind.Field,
+              insertText: row[0] as string,
+              detail: row[1] as string,
+              range,
+            });
+          });
+        } catch (e) {
+          // Schema not loaded yet
+        }
+
+        // SQL keywords
+        const keywords = ['SELECT', 'FROM', 'WHERE', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 
+          'ON', 'AND', 'OR', 'NOT', 'IN', 'LIKE', 'ORDER', 'BY', 'GROUP', 'HAVING', 'LIMIT', 
+          'OFFSET', 'AS', 'DISTINCT', 'COUNT', 'SUM', 'AVG', 'MAX', 'MIN', 'CASE', 'WHEN', 
+          'THEN', 'ELSE', 'END', 'NULL', 'IS', 'TRUE', 'FALSE', 'INSERT', 'UPDATE', 'DELETE',
+          'CREATE', 'TABLE', 'DROP', 'ALTER', 'INDEX', 'UNION', 'ALL', 'EXISTS', 'BETWEEN'];
+        
+        keywords.forEach(kw => {
+          suggestions.push({
+            label: kw,
+            kind: monaco.languages.CompletionItemKind.Keyword,
+            insertText: kw,
+            range,
+          });
+        });
+
+        return { suggestions };
+      },
+    });
   };
 
   const handleRun = useCallback(async () => {
@@ -171,8 +237,8 @@ function ResultsTable({ results }: { results: { columns: string[]; rows: unknown
   }
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
+    <div className="overflow-auto max-h-[180px] nodrag nowheel">
+      <table className="w-full text-sm border-collapse min-w-max">
         <thead>
           <tr className="border-b border-zinc-700">
             {results.columns.map((col, i) => (

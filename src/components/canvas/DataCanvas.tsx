@@ -25,6 +25,7 @@ import SqlCell from './nodes/SqlCell';
 import TextCell from './nodes/TextCell';
 import ChartCell from './nodes/ChartCell';
 import CanvasMenu from './CanvasMenu';
+import SchemaBrowser from './SchemaBrowser';
 import { loadCSVFile, loadParquetFile } from '@/lib/connectors/drivers/duckdb';
 
 const nodeTypes: NodeTypes = {
@@ -39,8 +40,8 @@ const initialNodes: Node[] = [
     type: 'sqlCell',
     position: { x: 100, y: 100 },
     data: {
-      label: 'Query 1',
-      sql: "SELECT 'Hello, Quarry!' AS greeting, 42 AS answer",
+      label: 'Sample Query',
+      sql: 'SELECT * FROM customers LIMIT 10',
       results: null,
       isExecuting: false,
     },
@@ -50,8 +51,15 @@ const initialNodes: Node[] = [
     type: 'sqlCell',
     position: { x: 100, y: 400 },
     data: {
-      label: 'Query 2 (Chained)',
-      sql: "SELECT * FROM sql_1 WHERE answer = 42",
+      label: 'Order Analysis',
+      sql: `SELECT 
+  c.name,
+  COUNT(o.id) as order_count,
+  SUM(o.total) as total_spent
+FROM orders o
+JOIN customers c ON o.customer_id = c.id
+GROUP BY c.name
+ORDER BY total_spent DESC`,
       results: null,
       isExecuting: false,
     },
@@ -61,8 +69,8 @@ const initialNodes: Node[] = [
     type: 'textCell',
     position: { x: 600, y: 100 },
     data: {
-      label: 'Notes',
-      content: '# Welcome to Quarry\n\n- Write SQL in cells\n- Reference other cells with `{{cell_id}}`\n- Visualize results',
+      label: 'Getting Started',
+      content: '# Welcome to Quarry\n\n**Sample tables available:**\n- `customers` - Customer info\n- `products` - Product catalog\n- `orders` - Order history\n\nClick **Run** to execute queries!',
     },
   },
 ];
@@ -75,6 +83,7 @@ interface DataCanvasProps {
 
 function DataCanvasContent({ canvasId }: DataCanvasProps) {
   const [isCollab, setIsCollab] = useState(false);
+  const [isSchemaOpen, setIsSchemaOpen] = useState(false);
   
   // Always use local state for nodes/edges (source of truth for data)
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
@@ -321,6 +330,12 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
     <div className="w-full h-full bg-zinc-950 relative">
       {/* Menu */}
       <CanvasMenu onAddNode={handleAddNode} onFileUpload={handleFileUpload} />
+
+      {/* Schema Browser */}
+      <SchemaBrowser 
+        isOpen={isSchemaOpen} 
+        onToggle={() => setIsSchemaOpen(!isSchemaOpen)}
+      />
 
       {/* Collab Status */}
       <div className="absolute top-4 right-4 z-50 flex gap-2">

@@ -27,10 +27,10 @@ export default function CanvasMenu({ onAddNode, onFileUpload }: CanvasMenuProps)
         href="/"
         className="bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 flex items-center gap-2 hover:bg-zinc-800 transition-colors"
       >
-        <svg className="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        {/* <svg className="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
-        </svg>
-        <span className="text-sm font-semibold text-white">Quarry</span>
+        </svg> */}
+        <span className="text-sm font-semibold text-indigo-500">Quarry</span>
       </Link>
 
       {/* Add Node Dropdown */}
