@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #09090b;
+  --foreground: #fafafa;
 }
 
 @theme inline {
@@ -12,15 +12,53 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+/* React Flow customizations */
+.react-flow__controls {
+  @apply bg-zinc-900 border border-zinc-800 rounded-lg shadow-xl;
+}
+
+.react-flow__controls button {
+  @apply bg-zinc-900 border-zinc-800 text-zinc-400 hover:bg-zinc-800 hover:text-white;
+}
+
+.react-flow__controls button:first-child {
+  @apply rounded-t-lg;
+}
+
+.react-flow__controls button:last-child {
+  @apply rounded-b-lg;
+}
+
+.react-flow__minimap {
+  @apply bg-zinc-900 border border-zinc-800 rounded-lg shadow-xl;
+}
+
+/* Custom scrollbar for dark theme */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #18181b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
+}
+
+/* Monaco editor focus fix */
+.monaco-editor .view-overlays .current-line {
+  border: none;
 }
