@@ -12,12 +12,35 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
-      - "5432:5432"
+      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U quarry"]
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # Cube.js semantic layer (dev mode with hot reload)
+  cubejs:
+    image: cubejs/cube:latest
+    container_name: quarry-cube-dev
+    environment:
+      CUBEJS_DEV_MODE: "true"
+      CUBEJS_DB_TYPE: postgres
+      CUBEJS_DB_HOST: db
+      CUBEJS_DB_PORT: 5432
+      CUBEJS_DB_NAME: quarry
+      CUBEJS_DB_USER: quarry
+      CUBEJS_DB_PASS: quarry_secret
+      CUBEJS_API_SECRET: quarry_cube_secret_key_min_32_chars_long
+      CUBEJS_SCHEMA_PATH: model
+      CUBEJS_WEB_SOCKETS: "true"
+    volumes:
+      - ./cube/model:/cube/conf/model
+    ports:
+      - "4545:4000"
+    depends_on:
+      db:
+        condition: service_healthy
 
   # Backend API with hot reload
   backend:

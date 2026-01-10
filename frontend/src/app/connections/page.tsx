@@ -96,11 +96,109 @@ export default function ConnectionsPage() {
   }, [columnMetadata]);
 
   // Load schema from DuckDB and metadata from backend
-  const loadSchema = useCallback(async () => {
+  useEffect(() => {
+    let isMounted = true;
+    
+    const loadSchema = async () => {
+      try {
+        await duckDB.init();
+        
+        const tablesResult = await duckDB.query(`
+          SELECT table_name FROM information_schema.tables 
+          WHERE table_schema = 'main' ORDER BY table_name
+        `);
+        
+        const tableSchemas: TableSchema[] = [];
+        
+        for (const row of tablesResult.rows) {
+          const tableName = row[0] as string;
+          const columnsResult = await duckDB.query(`
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_name = '${tableName}'
+            ORDER BY ordinal_position
+          `);
+          
+          tableSchemas.push({
+            name: tableName,
+            columns: columnsResult.rows.map(col => ({
+              name: col[0] as string,
+              type: col[1] as string,
+            })),
+          });
+        }
+        
+        if (!isMounted) return;
+        setTables(tableSchemas);
+        
+        // Load column metadata from backend API (ignore errors if backend not reachable)
+        try {
+          const metaRes = await fetch(`${API_URL}/api/metadata/columns`, { 
+            signal: AbortSignal.timeout(5000) 
+          });
+          if (metaRes.ok) {
+            const metaData: ColumnMetadata[] = await metaRes.json();
+            const metaMap: Record<string, ColumnMetadata> = {};
+            metaData.forEach(m => {
+              metaMap[`${m.table_name}.${m.column_name}`] = m;
+            });
+            if (isMounted) {
+              setColumnMetadata(metaMap);
+            }
+          }
+        } catch (e) {
+          // Silently fail - backend might not be accessible from browser
+        }
+
+        // Load relationships from backend API (ignore errors if backend not reachable)
+        try {
+          const res = await fetch(`${API_URL}/api/relationships`, { 
+            signal: AbortSignal.timeout(5000) 
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (isMounted) {
+              setRelationships(data);
+            }
+          }
+        } catch (e) {
+          // Silently fail - backend might not be accessible from browser
+        }
+
+        // Load metrics from backend API (ignore errors if backend not reachable)
+        try {
+          const metricsRes = await fetch(`${API_URL}/api/metrics`, { 
+            signal: AbortSignal.timeout(5000) 
+          });
+          if (metricsRes.ok) {
+            const metricsData = await metricsRes.json();
+            if (isMounted) {
+              setMetrics(metricsData);
+            }
+          }
+        } catch (e) {
+          // Silently fail - backend might not be accessible from browser
+        }
+      } catch (e) {
+        console.error('Failed to load schema:', e);
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      }
+    };
+    
+    loadSchema();
+    
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Separate function to manually reload
+  const reloadSchema = useCallback(async () => {
     setIsLoading(true);
     try {
-      await duckDB.init();
-      
       const tablesResult = await duckDB.query(`
         SELECT table_name FROM information_schema.tables 
         WHERE table_schema = 'main' ORDER BY table_name
@@ -127,53 +225,12 @@ export default function ConnectionsPage() {
       }
       
       setTables(tableSchemas);
-      
-      // Load column metadata from backend API
-      try {
-        const metaRes = await fetch(`${API_URL}/api/metadata/columns`);
-        if (metaRes.ok) {
-          const metaData: ColumnMetadata[] = await metaRes.json();
-          const metaMap: Record<string, ColumnMetadata> = {};
-          metaData.forEach(m => {
-            metaMap[`${m.table_name}.${m.column_name}`] = m;
-          });
-          setColumnMetadata(metaMap);
-        }
-      } catch (e) {
-        console.error('Failed to load column metadata:', e);
-      }
-
-      // Load relationships from backend API
-      try {
-        const res = await fetch(`${API_URL}/api/relationships`);
-        if (res.ok) {
-          const data = await res.json();
-          setRelationships(data);
-        }
-      } catch (e) {
-        console.error('Failed to load relationships from API:', e);
-      }
-
-      // Load metrics from backend API
-      try {
-        const metricsRes = await fetch(`${API_URL}/api/metrics`);
-        if (metricsRes.ok) {
-          const metricsData = await metricsRes.json();
-          setMetrics(metricsData);
-        }
-      } catch (e) {
-        console.error('Failed to load metrics:', e);
-      }
     } catch (e) {
-      console.error('Failed to load schema:', e);
+      console.error('Failed to reload schema:', e);
     } finally {
       setIsLoading(false);
     }
   }, []);
-
-  useEffect(() => {
-    loadSchema();
-  }, [loadSchema]);
 
   // Add relationship via backend API
   const addRelationship = async (rel: { fromTable: string; fromColumn: string; toTable: string; toColumn: string; type: string }) => {
@@ -357,7 +414,7 @@ export default function ConnectionsPage() {
 
         <div className="p-2 border-t border-zinc-800">
           <button
-            onClick={loadSchema}
+            onClick={reloadSchema}
             className="w-full px-3 py-2 text-sm text-zinc-400 hover:text-white hover:bg-zinc-800/50 rounded-md transition-colors flex items-center gap-2"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

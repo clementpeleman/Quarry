@@ -11,6 +11,7 @@
     "collab": "node server/websocket.mjs"
   },
   "dependencies": {
+    "@cubejs-client/core": "^1.6.2",
     "@duckdb/duckdb-wasm": "^1.33.1-dev13.0",
     "@monaco-editor/react": "^4.7.0",
     "@types/ws": "^8.18.1",

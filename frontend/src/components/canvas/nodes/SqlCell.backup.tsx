@@ -2,7 +2,7 @@
 
 import { memo, useState, useCallback, useRef, useEffect } from 'react';
 import { Handle, Position, NodeResizer, type NodeProps } from '@xyflow/react';
-import Editor from '@monaco-editor/react';
+import Editor, { type OnMount, type Monaco } from '@monaco-editor/react';
 import { duckDB } from '@/lib/query/DuckDBEngine';
 import { executeCubeQuery, sqlToCubeQuery } from '@/lib/cube/client';
 
@@ -24,18 +24,90 @@ function SqlCell({ data, id, selected }: NodeProps) {
   const [sql, setSql] = useState(cellData.sql || '');
   const [useCube, setUseCube] = useState(false);
   
+  // Use local results if available, otherwise show synced preview
   const results = cellData.results || (cellData.preview ? cellData.preview : null);
   const isPreviewOnly = !cellData.results && !!cellData.preview;
   const isExecuting = cellData.isExecuting;
   
   const [internalError, setInternalError] = useState<string | null>(null);
+  const editorRef = useRef<unknown>(null);
   const syncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Sync incoming SQL changes from collaborators
   useEffect(() => {
     if (cellData.sql !== undefined && cellData.sql !== sql) {
       setSql(cellData.sql);
     }
-  }, [cellData.sql, sql]);
+  }, [cellData.sql]);
+
+  const handleEditorMount: OnMount = (editor, monaco) => {
+    editorRef.current = editor;
+    
+    // Register SQL autocomplete provider
+    monaco.languages.registerCompletionItemProvider('sql', {
+      provideCompletionItems: async (model: any, position: any) => {
+        const word = model.getWordUntilPosition(position);
+        const range = {
+          startLineNumber: position.lineNumber,
+          endLineNumber: position.lineNumber,
+          startColumn: word.startColumn,
+          endColumn: word.endColumn,
+        };
+
+        const suggestions: any[] = [];
+
+        try {
+          // Get tables
+          const tables = await duckDB.query(`
+            SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'
+          `);
+          tables.rows.forEach(row => {
+            suggestions.push({
+              label: row[0] as string,
+              kind: monaco.languages.CompletionItemKind.Class,
+              insertText: row[0] as string,
+              detail: 'Table',
+              range,
+            });
+          });
+
+          // Get columns
+          const columns = await duckDB.query(`
+            SELECT DISTINCT column_name, data_type FROM information_schema.columns
+          `);
+          columns.rows.forEach(row => {
+            suggestions.push({
+              label: row[0] as string,
+              kind: monaco.languages.CompletionItemKind.Field,
+              insertText: row[0] as string,
+              detail: row[1] as string,
+              range,
+            });
+          });
+        } catch (e) {
+          // Schema not loaded yet
+        }
+
+        // SQL keywords
+        const keywords = ['SELECT', 'FROM', 'WHERE', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 
+          'ON', 'AND', 'OR', 'NOT', 'IN', 'LIKE', 'ORDER', 'BY', 'GROUP', 'HAVING', 'LIMIT', 
+          'OFFSET', 'AS', 'DISTINCT', 'COUNT', 'SUM', 'AVG', 'MAX', 'MIN', 'CASE', 'WHEN', 
+          'THEN', 'ELSE', 'END', 'NULL', 'IS', 'TRUE', 'FALSE', 'INSERT', 'UPDATE', 'DELETE',
+          'CREATE', 'TABLE', 'DROP', 'ALTER', 'INDEX', 'UNION', 'ALL', 'EXISTS', 'BETWEEN'];
+        
+        keywords.forEach(kw => {
+          suggestions.push({
+            label: kw,
+            kind: monaco.languages.CompletionItemKind.Keyword,
+            insertText: kw,
+            range,
+          });
+        });
+
+        return { suggestions };
+      },
+    });
+  };
 
   const handleRun = useCallback(async () => {
     setInternalError(null);
@@ -82,6 +154,7 @@ function SqlCell({ data, id, selected }: NodeProps) {
         lineClassName="!border-indigo-500"
         handleClassName="!w-2 !h-2 !bg-indigo-500 !border-0"
       />
+      {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 bg-zinc-800/50 rounded-t-xl border-b border-zinc-700">
         <div className="flex items-center gap-2">
           <div className="w-3 h-3 rounded-full bg-indigo-500" />
@@ -94,32 +167,32 @@ function SqlCell({ data, id, selected }: NodeProps) {
             <button onClick={() => setUseCube(true)} className={`px-2 py-1 text-xs rounded ${useCube ? 'bg-indigo-600 text-white' : 'text-zinc-400'}`} title="Cube.js">☁️</button>
           </div>
           <button
-            onClick={handleRun}
-            disabled={isExecuting}
-            className={`
-              px-3 py-1 text-xs font-medium rounded-md
-              transition-all duration-200
-              ${isExecuting 
-                ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed' 
-                : 'bg-indigo-600 text-white hover:bg-indigo-500 active:scale-95'
-              }
-            `}
-          >
-            {isExecuting ? (
-              <span className="flex items-center gap-1">
-                <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                </svg>
-                Running...
-              </span>
-            ) : (
-              '▶ Run'
-            )}
-          </button>
-        </div>
+          onClick={handleRun}
+          disabled={isExecuting}
+          className={`
+            px-3 py-1 text-xs font-medium rounded-md
+            transition-all duration-200
+            ${isExecuting 
+              ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed' 
+              : 'bg-indigo-600 text-white hover:bg-indigo-500 active:scale-95'
+            }
+          `}
+        >
+          {isExecuting ? (
+            <span className="flex items-center gap-1">
+              <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Running...
+            </span>
+          ) : (
+            '▶ Run'
+          )}
+        </button>
       </div>
 
+      {/* SQL Editor - nodrag/nowheel prevents node movement when interacting with editor */}
       <div className="border-b border-zinc-700 overflow-hidden nodrag nowheel">
         <Editor
           height="120px"
@@ -128,6 +201,7 @@ function SqlCell({ data, id, selected }: NodeProps) {
           value={sql}
           onChange={(value) => {
             setSql(value || '');
+            // Debounced sync to collaborators
             if (cellData.onTextChange) {
               if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
               syncTimeoutRef.current = setTimeout(() => {
@@ -135,6 +209,7 @@ function SqlCell({ data, id, selected }: NodeProps) {
               }, 300);
             }
           }}
+          onMount={handleEditorMount}
           options={{
             minimap: { enabled: false },
             fontSize: 13,
@@ -150,6 +225,7 @@ function SqlCell({ data, id, selected }: NodeProps) {
         />
       </div>
 
+      {/* Results */}
       {(results || displayError) && (
         <div className="p-3 max-h-[200px] overflow-auto">
           {displayError ? (
@@ -170,6 +246,7 @@ function SqlCell({ data, id, selected }: NodeProps) {
         </div>
       )}
 
+      {/* Connection handles */}
       <Handle
         type="target"
         position={Position.Top}

@@ -3,11 +3,19 @@ import cors from 'cors';
 import { Pool } from 'pg';
 import dotenv from 'dotenv';
 import OpenAI from 'openai';
+import jwt from 'jsonwebtoken';
+import fetch from 'node-fetch';
+import fs from 'fs/promises';
+import path from 'path';
 
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 4000;
+
+// Cube.js configuration
+const CUBE_API_URL = process.env.CUBE_API_URL || 'http://cubejs:4000';
+const CUBE_API_SECRET = process.env.CUBE_API_SECRET || 'quarry_cube_secret_key_min_32_chars_long';
 
 // Middleware
 app.use(cors());
@@ -266,6 +274,188 @@ app.delete('/api/canvases/:id', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to delete canvas' });
+  }
+});
+
+// ============================================
+// CUBE.JS INTEGRATION API
+// ============================================
+
+// Helper function to generate JWT for Cube.js
+const generateCubeToken = () => {
+  return jwt.sign({}, CUBE_API_SECRET, { expiresIn: '1h' });
+};
+
+// Proxy to Cube.js /meta endpoint
+app.get('/api/cube/meta', async (req, res) => {
+  try {
+    const token = generateCubeToken();
+    const response = await fetch(`${CUBE_API_URL}/cubejs-api/v1/meta`, {
+      headers: {
+        'Authorization': token,
+        'Content-Type': 'application/json',
+      },
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Cube API returned ${response.status}`);
+    }
+    
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    console.error('Cube meta error:', err);
+    res.status(500).json({ error: 'Failed to fetch Cube metadata' });
+  }
+});
+
+// Proxy to Cube.js /load endpoint
+app.post('/api/cube/load', async (req, res) => {
+  try {
+    const token = generateCubeToken();
+    const response = await fetch(`${CUBE_API_URL}/cubejs-api/v1/load`, {
+      method: 'POST',
+      headers: {
+        'Authorization': token,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(req.body),
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Cube API returned ${response.status}: ${errorText}`);
+    }
+    
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    console.error('Cube load error:', err);
+    res.status(500).json({ error: 'Failed to execute Cube query' });
+  }
+});
+
+// Sync Quarry metrics to Cube.js schemas
+app.post('/api/cube/sync', async (req, res) => {
+  try {
+    // Fetch all metrics and relationships from Quarry
+    const metricsResult = await pool.query('SELECT * FROM metrics ORDER BY name');
+    const relationshipsResult = await pool.query('SELECT * FROM relationships ORDER BY from_table');
+    const columnsResult = await pool.query('SELECT * FROM column_metadata ORDER BY table_name, column_name');
+    
+    const metrics = metricsResult.rows;
+    const relationships = relationshipsResult.rows;
+    const columns = columnsResult.rows;
+    
+    // Group metrics by table
+    const metricsByTable: Record<string, any[]> = {};
+    metrics.forEach(metric => {
+      if (!metricsByTable[metric.table_name]) {
+        metricsByTable[metric.table_name] = [];
+      }
+      metricsByTable[metric.table_name].push(metric);
+    });
+    
+    // Group relationships by from_table
+    const relationshipsByTable: Record<string, any[]> = {};
+    relationships.forEach(rel => {
+      if (!relationshipsByTable[rel.from_table]) {
+        relationshipsByTable[rel.from_table] = [];
+      }
+      relationshipsByTable[rel.from_table].push(rel);
+    });
+    
+    // Group columns by table
+    const columnsByTable: Record<string, any[]> = {};
+    columns.forEach(col => {
+      if (!columnsByTable[col.table_name]) {
+        columnsByTable[col.table_name] = [];
+      }
+      columnsByTable[col.table_name].push(col);
+    });
+    
+    // Generate Cube schema files
+    const generatedDir = path.join(process.cwd(), '../cube/model/generated');
+    
+    // Create generated directory if it doesn't exist
+    try {
+      await fs.mkdir(generatedDir, { recursive: true });
+    } catch (mkdirErr) {
+      // Directory might already exist
+    }
+    
+    const generatedFiles: string[] = [];
+    
+    // Get unique tables from metrics
+    const tables = [...new Set(metrics.map(m => m.table_name))];
+    
+    for (const tableName of tables) {
+      const tableMetrics = metricsByTable[tableName] || [];
+      const tableRelationships = relationshipsByTable[tableName] || [];
+      const tableColumns = columnsByTable[tableName] || [];
+      
+      // Generate cube name (capitalize first letter)
+      const cubeName = tableName.charAt(0).toUpperCase() + tableName.slice(1);
+      
+      // Build measures object
+      const measuresCode = tableMetrics.map(metric => {
+        return `    ${metric.name}: {
+      sql: \`${metric.expression}\`,
+      type: '${metric.metric_type}',
+      description: '${metric.description || metric.display_name}'
+    }`;
+      }).join(',\n');
+      
+      // Build dimensions object from columns
+      const dimensionsCode = tableColumns.map(col => {
+        return `    ${col.column_name}: {
+      sql: \`${col.column_name}\`,
+      type: 'string',
+      description: '${col.description || col.alias || col.column_name}'
+    }`;
+      }).join(',\n');
+      
+      // Build joins object
+      const joinsCode = tableRelationships.map(rel => {
+        const targetCube = rel.to_table.charAt(0).toUpperCase() + rel.to_table.slice(1);
+        return `    ${targetCube}: {
+      relationship: '${rel.relationship_type}',
+      sql: \`\${CUBE}.${rel.from_column} = \${${targetCube}}.${rel.to_column}\`
+    }`;
+      }).join(',\n');
+      
+      // Generate complete cube file
+      const cubeCode = `cube('${cubeName}', {
+  sql_table: '${tableName}',
+  
+  measures: {
+${measuresCode || '    // No measures defined'}
+  },
+  
+  dimensions: {
+${dimensionsCode || '    // No dimensions defined'}
+  }${joinsCode ? `,
+  
+  joins: {
+${joinsCode}
+  }` : ''}
+});
+`;
+      
+      const fileName = `${cubeName}.js`;
+      const filePath = path.join(generatedDir, fileName);
+      await fs.writeFile(filePath, cubeCode, 'utf8');
+      generatedFiles.push(fileName);
+    }
+    
+    res.json({
+      success: true,
+      message: `Generated ${generatedFiles.length} Cube schema file(s)`,
+      files: generatedFiles
+    });
+  } catch (err) {
+    console.error('Cube sync error:', err);
+    res.status(500).json({ error: 'Failed to sync to Cube' });
   }
 });
 

