@@ -27,6 +27,7 @@ services:
     environment:
       DATABASE_URL: postgresql://quarry:quarry_secret@db:5432/quarry
       PORT: 4000
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
     ports:
       - "4000:4000"
     depends_on:
@@ -42,6 +43,7 @@ services:
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:4000
       NEXT_PUBLIC_WS_URL: ws://localhost:1234
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
     ports:
       - "3000:3000"
     depends_on:

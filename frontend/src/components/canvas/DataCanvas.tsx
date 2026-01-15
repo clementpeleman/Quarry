@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useMemo, useEffect, useState } from 'react';
+import { useCallback, useMemo, useEffect, useState, useRef } from 'react';
 import {
   ReactFlow,
   Background,
@@ -20,6 +20,8 @@ import {
 import '@xyflow/react/dist/style.css';
 import { duckDB } from '@/lib/query/DuckDBEngine';
 import { useYjs } from '@/lib/collab/useYjs';
+import { useConnections } from '@/lib/connections/store';
+import { useCanvas } from '@/lib/canvas/store';
 
 import SqlCell from './nodes/SqlCell';
 import TextCell from './nodes/TextCell';
@@ -29,72 +31,175 @@ import SchemaBrowser from './SchemaBrowser';
 import ColumnMappingModal from './ColumnMappingModal';
 import { loadCSVFile, loadParquetFile } from '@/lib/connectors/drivers/duckdb';
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+
 const nodeTypes: NodeTypes = {
   sqlCell: SqlCell,
   textCell: TextCell,
   chartCell: ChartCell,
 };
 
-const initialNodes: Node[] = [
-  {
-    id: 'sql-1',
-    type: 'sqlCell',
-    position: { x: 100, y: 100 },
-    data: {
-      label: 'Sample Query',
-      sql: 'SELECT * FROM customers LIMIT 10',
-      results: null,
-      isExecuting: false,
-    },
-  },
-  {
-    id: 'sql-2',
-    type: 'sqlCell',
-    position: { x: 100, y: 400 },
-    data: {
-      label: 'Order Analysis',
-      sql: `SELECT 
-  c.name,
-  COUNT(o.id) as order_count,
-  SUM(o.total) as total_spent
-FROM orders o
-JOIN customers c ON o.customer_id = c.id
-GROUP BY c.name
-ORDER BY total_spent DESC`,
-      results: null,
-      isExecuting: false,
-    },
-  },
-  {
-    id: 'text-1',
-    type: 'textCell',
-    position: { x: 600, y: 100 },
-    data: {
-      label: 'Getting Started',
-      content: '# Welcome to Quarry\n\n**Sample tables available:**\n- `customers` - Customer info\n- `products` - Product catalog\n- `orders` - Order history\n\nClick **Run** to execute queries!',
-    },
-  },
-];
+// Default dimensions for each node type
+const NODE_DEFAULTS = {
+  sqlCell: { width: 500, height: 350 },
+  textCell: { width: 300, height: 250 },
+  chartCell: { width: 450, height: 350 },
+};
 
-const initialEdges: Edge[] = [];
+// Empty initial state - canvas loads from database
+const emptyNodes: Node[] = [];
+const emptyEdges: Edge[] = [];
 
 interface DataCanvasProps {
   canvasId?: string;
 }
 
 function DataCanvasContent({ canvasId }: DataCanvasProps) {
+  const { activeConnection } = useConnections();
+  const {
+    canvases,
+    currentCanvasId,
+    currentCanvasName,
+    isLoading: isCanvasLoading,
+    isCanvasListLoading,
+    isSaving,
+    lastSaved,
+    error,
+    fetchCanvases,
+    loadCanvas,
+    saveCanvas,
+    createCanvas,
+    setCurrentCanvasId,
+  } = useCanvas();
+
   const [isCollab, setIsCollab] = useState(false);
   const [isSchemaOpen, setIsSchemaOpen] = useState(false);
+  const [useDuckDB, setUseDuckDB] = useState(true); // DuckDB is default (demo); PostgreSQL for custom connections
   const [pendingConnection, setPendingConnection] = useState<{
     sourceId: string;
     targetId: string;
     columns: string[];
     chartType: 'bar' | 'line' | 'pie' | 'bigNumber';
   } | null>(null);
-  
+  const [isInitialized, setIsInitialized] = useState(false);
+  const [isRepairing, setIsRepairing] = useState(false);
+
   // Always use local state for nodes/edges (source of truth for data)
-  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+  const [nodes, setNodes, onNodesChange] = useNodesState(emptyNodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState(emptyEdges);
+
+  // Auto-save debounce ref
+  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastSavedNodesRef = useRef<string>('');
+  const lastSavedEdgesRef = useRef<string>('');
+
+  // Determine effective connection ID for canvases
+  // If useDuckDB is true, we treat it as "Local" mode (no connection ID)
+  const effectiveConnectionId = useDuckDB ? undefined : activeConnection?.id;
+
+  // Load canvas list on mount or when active connection changes
+  useEffect(() => {
+    setIsInitialized(false); // Reset initialization logic for new connection
+    fetchCanvases(effectiveConnectionId);
+  }, [fetchCanvases, effectiveConnectionId]);
+
+  // Load canvas when currentCanvasId changes or on initial load
+  useEffect(() => {
+    async function initCanvas() {
+      // Wait for list to load first to ensure validation
+      if (isCanvasListLoading) return;
+      if (isInitialized) return;
+
+      let targetCanvasId = currentCanvasId;
+      
+      // Validation: Check if current ID belongs to this list
+      if (targetCanvasId && !canvases.some(c => c.id === targetCanvasId)) {
+         targetCanvasId = null; // Stale ID, ignore
+      }
+
+      if (targetCanvasId) {
+        try {
+          const data = await loadCanvas(targetCanvasId);
+          setNodes(data.nodes);
+          setEdges(data.edges);
+          lastSavedNodesRef.current = JSON.stringify(data.nodes);
+          lastSavedEdgesRef.current = JSON.stringify(data.edges);
+          setIsInitialized(true);
+        } catch (err) {
+           console.error('Failed to load canvas, falling back:', err);
+           targetCanvasId = null;
+        }
+      } 
+      
+      if (!targetCanvasId) {
+         // Fallback: Load most recent or create new
+         if (canvases.length > 0) {
+            const mostRecent = canvases[0];
+            try {
+               const data = await loadCanvas(mostRecent.id);
+               setNodes(data.nodes);
+               setEdges(data.edges);
+               lastSavedNodesRef.current = JSON.stringify(data.nodes);
+               lastSavedEdgesRef.current = JSON.stringify(data.edges);
+               setIsInitialized(true);
+            } catch (e) {
+                console.error('Failed to load most recent canvas:', e);
+            }
+         } else {
+            // Create new
+             try {
+                await createCanvas('Untitled Canvas', effectiveConnectionId);
+                setNodes([]);
+                setEdges([]);
+                lastSavedNodesRef.current = '[]';
+                lastSavedEdgesRef.current = '[]';
+                setIsInitialized(true);
+             } catch(e) {
+                 console.error('Failed to create default canvas:', e);
+             }
+         }
+      }
+    }
+
+    initCanvas();
+  }, [canvases, currentCanvasId, loadCanvas, createCanvas, setNodes, setEdges, isInitialized, effectiveConnectionId, isCanvasListLoading]);
+
+  // Auto-save when nodes or edges change (debounced)
+  useEffect(() => {
+    if (!isInitialized || !currentCanvasId) return;
+
+    const currentNodesStr = JSON.stringify(nodes.map(n => ({
+      id: n.id,
+      type: n.type,
+      position: n.position,
+      style: n.style,
+      data: { label: n.data?.label, sql: n.data?.sql, content: n.data?.content, chartType: n.data?.chartType, columnMapping: n.data?.columnMapping }
+    })));
+    const currentEdgesStr = JSON.stringify(edges);
+
+    // Skip if nothing changed
+    if (currentNodesStr === lastSavedNodesRef.current && currentEdgesStr === lastSavedEdgesRef.current) {
+      return;
+    }
+
+    // Clear existing timeout
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+
+    // Debounce save by 2 seconds
+    saveTimeoutRef.current = setTimeout(() => {
+      saveCanvas(nodes, edges);
+      lastSavedNodesRef.current = currentNodesStr;
+      lastSavedEdgesRef.current = currentEdgesStr;
+    }, 2000);
+
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+    };
+  }, [nodes, edges, isInitialized, currentCanvasId, saveCanvas]);
 
   // Collab State - for position, edge, preview, node, and text syncing
   const { 
@@ -241,57 +346,86 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
   }, [setNodes]);
 
   const handleRunQuery = useCallback(async (nodeId: string, sql: string) => {
-    updateNodeData(nodeId, { isExecuting: true });
+    updateNodeData(nodeId, { isExecuting: true, error: undefined });
+    const startTime = performance.now();
 
     try {
-      const allNodes = getNodes();
-      const dependencyRegex = /\{\{\s*([a-zA-Z0-9_-]+)\s*\}\}/g;
-      const dependencies = new Set<string>();
-      
-      let executableSql = sql;
+      let result: { columns: string[]; rows: unknown[][] };
 
-      executableSql = executableSql.replace(dependencyRegex, (match, id) => {
-        dependencies.add(id);
-        return id.replace(/-/g, '_'); 
-      });
+      if (useDuckDB) {
+        // Use DuckDB (for file uploads and local data)
+        const allNodes = getNodes();
+        const dependencyRegex = /\{\{\s*([a-zA-Z0-9_-]+)\s*\}\}/g;
+        const dependencies = new Set<string>();
 
-      for (const depId of dependencies) {
-        const depNode = allNodes.find((n) => n.id === depId);
-        if (depNode && depNode.data.results) {
-          const tableName = depId.replace(/-/g, '_');
-          const results = depNode.data.results as { rows: unknown[][]; columns: string[] };
-          
-          const objects = results.rows.map(row => {
-            const obj: Record<string, unknown> = {};
-            results.columns.forEach((col, i) => {
-              obj[col] = row[i];
+        let executableSql = sql;
+
+        executableSql = executableSql.replace(dependencyRegex, (match, id) => {
+          dependencies.add(id);
+          return id.replace(/-/g, '_');
+        });
+
+        for (const depId of dependencies) {
+          const depNode = allNodes.find((n) => n.id === depId);
+          if (depNode && depNode.data.results) {
+            const tableName = depId.replace(/-/g, '_');
+            const results = depNode.data.results as { rows: unknown[][]; columns: string[] };
+
+            const objects = results.rows.map(row => {
+              const obj: Record<string, unknown> = {};
+              results.columns.forEach((col, i) => {
+                obj[col] = row[i];
+              });
+              return obj;
             });
-            return obj;
-          });
-          
-          await duckDB.createTableFromJSON(tableName, objects);
+
+            await duckDB.createTableFromJSON(tableName, objects);
+          }
         }
+
+        result = await duckDB.query(executableSql);
+      } else {
+        // Use PostgreSQL via backend API
+        if (!activeConnection) {
+          throw new Error('No active connection. Please select a connection first.');
+        }
+
+        const response = await fetch(`${API_URL}/api/query`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            connection_id: activeConnection.id,
+            sql,
+          }),
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Query execution failed');
+        }
+
+        result = await response.json();
       }
 
-      const result = await duckDB.query(executableSql);
-      updateNodeData(nodeId, { results: result, isExecuting: false });
-      
+      const duration = performance.now() - startTime;
+      updateNodeData(nodeId, { results: result, isExecuting: false, lastExecutionDuration: duration });
+
       // Auto-update connected chart nodes
       const connectedCharts = edges
         .filter(e => e.source === nodeId)
         .map(e => nodes.find(n => n.id === e.target))
         .filter(n => n?.type === 'chartCell');
-      
+
       connectedCharts.forEach(chartNode => {
         if (chartNode) {
-          setNodes(nds => nds.map(n => 
-            n.id === chartNode.id 
+          setNodes(nds => nds.map(n =>
+            n.id === chartNode.id
               ? { ...n, data: { ...n.data, results: result } }
               : n
           ));
         }
       });
-      
+
       // Sync preview (first 5 rows) to collaborators
       if (isCollab && isSynced && syncPreview && result.rows) {
         const preview = {
@@ -301,46 +435,65 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
         };
         syncPreview(nodeId, preview);
       }
-      
+
     } catch (error) {
       console.error(error);
       updateNodeData(nodeId, { isExecuting: false, error: (error as Error).message });
     }
-  }, [getNodes, updateNodeData, isCollab, isSynced, syncPreview, edges, nodes, setNodes]);
+  }, [getNodes, updateNodeData, isCollab, isSynced, syncPreview, edges, nodes, setNodes, useDuckDB, activeConnection]);
 
-  // Inject callbacks into nodes
+  // Inject callbacks and data source info into nodes
   const nodesWithCallback = useMemo(() => {
     return nodes.map(node => {
-      if (node.type === 'sqlCell' || node.type === 'chartCell') {
+      if (node.type === 'sqlCell') {
         return {
           ...node,
           data: {
             ...node.data,
             onRun: (sql: string) => handleRunQuery(node.id, sql),
-            onTextChange: isCollab && isSynced && syncText 
-              ? (text: string) => syncText(node.id, text) 
+            onTextChange: isCollab && isSynced && syncText
+              ? (text: string) => syncText(node.id, text)
               : undefined,
+            // Sync SQL changes back to parent node for auto-save persistence
+            onSqlChange: (sql: string) => updateNodeData(node.id, { sql }),
+            // Pass data source info for autocomplete
+            useDuckDB,
+            connectionId: activeConnection?.id,
+          },
+        };
+      }
+      if (node.type === 'chartCell') {
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            onRun: (sql: string) => handleRunQuery(node.id, sql),
+            // Allow changing chart type
+            onChartTypeChange: (type: 'bar' | 'line' | 'pie' | 'bigNumber') => 
+              updateNodeData(node.id, { chartType: type }),
           },
         };
       }
       return node;
     });
-  }, [nodes, handleRunQuery, isCollab, isSynced, syncText]);
+  }, [nodes, handleRunQuery, isCollab, isSynced, syncText, useDuckDB, activeConnection, updateNodeData]);
 
   // Add new node
   const handleAddNode = useCallback((type: 'sqlCell' | 'textCell' | 'chartCell') => {
+    const defaults = NODE_DEFAULTS[type];
     const newNode: Node = {
       id: `${type}-${Date.now()}`,
       type,
       position: { x: 200 + Math.random() * 100, y: 200 + Math.random() * 100 },
-      data: type === 'sqlCell' 
+      style: { width: defaults.width, height: defaults.height },
+      data: type === 'sqlCell'
         ? { label: 'New Query', sql: '', results: null, isExecuting: false }
         : type === 'chartCell'
         ? { label: 'New Chart', sql: '', results: null, chartType: 'bar', isExecuting: false }
         : { label: 'New Note', content: '# Title\n\nWrite your notes here...' },
     };
     setNodes((nds) => [...nds, newNode]);
-    
+
     // Sync new node to collaborators
     if (isCollab && isSynced && syncNode) {
       syncNode(newNode);
@@ -371,6 +524,26 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
   }, []);
 
   // Handle column mapping selection
+  // Handle database repair
+  const handleRepairDatabase = useCallback(async () => {
+    setIsRepairing(true);
+    try {
+      const res = await fetch(`${API_URL}/api/system/migrate`, { method: 'POST' });
+      if (res.ok) {
+        // Refresh page to reload everything
+        window.location.reload();
+      } else {
+        const data = await res.json();
+        alert(`Repair failed: ${data.error}`);
+        setIsRepairing(false);
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Repair failed (network error)');
+      setIsRepairing(false);
+    }
+  }, []);
+
   const handleColumnMappingSave = useCallback((mapping: { xColumn: string; yColumn: string }) => {
     if (!pendingConnection) return;
     
@@ -410,29 +583,84 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
   return (
     <div className="w-full h-full bg-zinc-950 relative">
       {/* Menu */}
-      <CanvasMenu onAddNode={handleAddNode} onFileUpload={handleFileUpload} />
+      <CanvasMenu
+        onAddNode={handleAddNode}
+        onFileUpload={handleFileUpload}
+        activeConnectionId={effectiveConnectionId}
+        onLoadCanvas={(data) => {
+          setNodes(data.nodes);
+          setEdges(data.edges);
+          lastSavedNodesRef.current = JSON.stringify(data.nodes);
+          lastSavedEdgesRef.current = JSON.stringify(data.edges);
+        }}
+      />
+      
+      {/* Database Repair Overlay */}
+      {error && error.includes('connection_id') && (
+        <div className="absolute inset-0 z-[100] flex items-center justify-center bg-zinc-950/90 backdrop-blur-sm">
+          <div className="bg-zinc-900 border border-red-900/50 p-8 rounded-xl max-w-md text-center shadow-2xl">
+            <div className="w-12 h-12 bg-red-900/20 rounded-full flex items-center justify-center mx-auto mb-4">
+               <svg className="w-6 h-6 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+               </svg>
+            </div>
+            <h3 className="text-xl font-bold text-white mb-2">Database Setup Required</h3>
+            <p className="text-zinc-400 mb-6 leading-relaxed">
+              Your database needs a schema update to support environment switching. 
+              This will safely add the required columns without affecting existing data.
+            </p>
+            <button
+              onClick={handleRepairDatabase}
+              disabled={isRepairing}
+              className="w-full px-4 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium transition-all shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2"
+            >
+              {isRepairing ? (
+                <>
+                  <svg className="animate-spin h-5 w-5 text-white" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Updating Schema...
+                </>
+              ) : (
+                'Update Database Schema'
+              )}
+            </button>
+          </div>
+        </div>
+      )}
 
-      {/* Schema Browser */}
-      <SchemaBrowser 
-        isOpen={isSchemaOpen} 
+      {/* Schema Browser / Data Source Selector */}
+      <SchemaBrowser
+        isOpen={isSchemaOpen}
         onToggle={() => setIsSchemaOpen(!isSchemaOpen)}
+        useDuckDB={useDuckDB}
+        onDataSourceChange={setUseDuckDB}
       />
 
-      {/* Collab Status */}
+      {/* Top Right Controls */}
       <div className="absolute top-4 right-4 z-50 flex gap-2">
+         {/* Save Status */}
+         <div className="bg-zinc-900 border border-zinc-800 rounded-md p-1 flex items-center gap-2 px-3">
+             <div className={`w-2 h-2 rounded-full ${isSaving ? 'bg-yellow-500 animate-pulse' : lastSaved ? 'bg-green-500' : 'bg-zinc-500'}`} />
+             <span className="text-xs text-zinc-400 font-medium">
+                 {isSaving ? 'Saving...' : lastSaved ? `Saved ${lastSaved.toLocaleTimeString()}` : 'Not saved'}
+             </span>
+         </div>
+         {/* Collab Status */}
          <div className="bg-zinc-900 border border-zinc-800 rounded-md p-1 flex items-center gap-2 px-3">
              <div className={`w-2 h-2 rounded-full ${isSynced ? 'bg-green-500' : isCollab ? 'bg-yellow-500' : 'bg-zinc-500'}`} />
              <span className="text-xs text-zinc-400 font-medium">
                  {isSynced ? `Live (${users})` : isCollab ? 'Connecting...' : 'Local'}
              </span>
          </div>
-         <button 
+         <button
             onClick={() => setIsCollab(!isCollab)}
             className={`
                 px-3 py-1.5 text-xs font-medium rounded-md border
                 transition-all
-                ${isCollab 
-                    ? 'bg-red-900/20 border-red-900 text-red-400 hover:bg-red-900/40' 
+                ${isCollab
+                    ? 'bg-red-900/20 border-red-900 text-red-400 hover:bg-red-900/40'
                     : 'bg-zinc-900 border-zinc-800 text-white hover:bg-zinc-800'}
             `}
          >
@@ -458,15 +686,23 @@ function DataCanvasContent({ canvasId }: DataCanvasProps) {
       >
         <Background 
           variant={BackgroundVariant.Dots} 
-          gap={20} 
-          size={1} 
+          gap={30} 
+          size={1.5} 
           color="#27272a"
         />
         <Controls className="bg-zinc-900 border-zinc-800 text-white" />
         <MiniMap 
           nodeColor="#6366f1"
-          maskColor="rgba(0, 0, 0, 0.8)"
-          className="bg-zinc-900 border-zinc-800"
+          maskColor="transparent"
+          nodeStrokeWidth={2}
+          style={{ 
+            width: 140, 
+            height: 90,
+            background: 'transparent',
+            border: 'none',
+            transformOrigin: 'bottom right',
+          }}
+          className="opacity-30 hover:opacity-100 hover:scale-150 transition-all duration-300 ease-out"
         />
       </ReactFlow>
 

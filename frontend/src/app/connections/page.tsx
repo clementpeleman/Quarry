@@ -1,891 +1,479 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { duckDB } from '@/lib/query/DuckDBEngine';
+import { useConnections, Connection, ConnectionInput } from '@/lib/connections/store';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
-
-interface TableSchema {
-  name: string;
-  columns: ColumnSchema[];
-}
-
-interface ColumnSchema {
-  name: string;
-  type: string;
-  description?: string;
-  alias?: string;
-}
-
-interface ColumnMetadata {
-  table_name: string;
-  column_name: string;
-  description: string;
-  alias: string;
-}
-
-interface Relationship {
-  id: number;
-  from_table: string;
-  from_column: string;
-  to_table: string;
-  to_column: string;
-  relationship_type: 'one-to-one' | 'one-to-many' | 'many-to-many';
-}
-
-interface Metric {
-  id: number;
-  name: string;
-  display_name: string;
-  description: string;
-  table_name: string;
-  expression: string;
-  metric_type: 'measure' | 'dimension';
-}
+const CUBE_API_URL = process.env.NEXT_PUBLIC_CUBE_API_URL || 'http://localhost:4545';
 
 export default function ConnectionsPage() {
-  const [tables, setTables] = useState<TableSchema[]>([]);
-  const [relationships, setRelationships] = useState<Relationship[]>([]);
-  const [metrics, setMetrics] = useState<Metric[]>([]);
-  const [columnMetadata, setColumnMetadata] = useState<Record<string, ColumnMetadata>>({});
-  const [selectedTable, setSelectedTable] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [showRelationshipModal, setShowRelationshipModal] = useState(false);
-  const [showMetricModal, setShowMetricModal] = useState(false);
-  const [activeTab, setActiveTab] = useState<'schema' | 'metrics'>('schema');
-  const saveTimeoutRef = useRef<Record<string, NodeJS.Timeout>>({});
+  const {
+    connections,
+    activeConnection,
+    isLoading,
+    error,
+    fetchConnections,
+    createConnection,
+    deleteConnection,
+    testConnection,
+    activateConnection,
+  } = useConnections();
 
-  // Save column metadata with debounce
-  const saveColumnMetadata = useCallback((tableName: string, columnName: string, field: 'description' | 'alias', value: string) => {
-    const key = `${tableName}.${columnName}`;
-    
-    // Update local state immediately
-    setColumnMetadata(prev => ({
-      ...prev,
-      [key]: {
-        ...prev[key],
-        table_name: tableName,
-        column_name: columnName,
-        [field]: value,
-      },
-    }));
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [cubeStatus, setCubeStatus] = useState<'loading' | 'connected' | 'error'>('loading');
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [testResults, setTestResults] = useState<Record<string, { success: boolean; error?: string }>>({});
 
-    // Debounce API call
-    if (saveTimeoutRef.current[key]) {
-      clearTimeout(saveTimeoutRef.current[key]);
-    }
-    
-    saveTimeoutRef.current[key] = setTimeout(async () => {
-      const current = columnMetadata[key] || {};
-      try {
-        await fetch(`${API_URL}/api/metadata/columns`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            table_name: tableName,
-            column_name: columnName,
-            description: field === 'description' ? value : current.description || '',
-            alias: field === 'alias' ? value : current.alias || '',
-          }),
-        });
-      } catch (e) {
-        console.error('Failed to save column metadata:', e);
-      }
-    }, 500);
-  }, [columnMetadata]);
-
-  // Load schema from DuckDB and metadata from backend
+  // Check Cube.js connection status
   useEffect(() => {
-    let isMounted = true;
-    
-    const loadSchema = async () => {
+    const checkCubeStatus = async () => {
       try {
-        await duckDB.init();
-        
-        const tablesResult = await duckDB.query(`
-          SELECT table_name FROM information_schema.tables 
-          WHERE table_schema = 'main' ORDER BY table_name
-        `);
-        
-        const tableSchemas: TableSchema[] = [];
-        
-        for (const row of tablesResult.rows) {
-          const tableName = row[0] as string;
-          const columnsResult = await duckDB.query(`
-            SELECT column_name, data_type
-            FROM information_schema.columns
-            WHERE table_name = '${tableName}'
-            ORDER BY ordinal_position
-          `);
-          
-          tableSchemas.push({
-            name: tableName,
-            columns: columnsResult.rows.map(col => ({
-              name: col[0] as string,
-              type: col[1] as string,
-            })),
-          });
+        const res = await fetch(`${CUBE_API_URL}/cubejs-api/v1/meta`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        if (res.ok) {
+          setCubeStatus('connected');
+        } else {
+          setCubeStatus('error');
         }
-        
-        if (!isMounted) return;
-        setTables(tableSchemas);
-        
-        // Load column metadata from backend API (ignore errors if backend not reachable)
-        try {
-          const metaRes = await fetch(`${API_URL}/api/metadata/columns`, { 
-            signal: AbortSignal.timeout(5000) 
-          });
-          if (metaRes.ok) {
-            const metaData: ColumnMetadata[] = await metaRes.json();
-            const metaMap: Record<string, ColumnMetadata> = {};
-            metaData.forEach(m => {
-              metaMap[`${m.table_name}.${m.column_name}`] = m;
-            });
-            if (isMounted) {
-              setColumnMetadata(metaMap);
-            }
-          }
-        } catch (e) {
-          // Silently fail - backend might not be accessible from browser
-        }
-
-        // Load relationships from backend API (ignore errors if backend not reachable)
-        try {
-          const res = await fetch(`${API_URL}/api/relationships`, { 
-            signal: AbortSignal.timeout(5000) 
-          });
-          if (res.ok) {
-            const data = await res.json();
-            if (isMounted) {
-              setRelationships(data);
-            }
-          }
-        } catch (e) {
-          // Silently fail - backend might not be accessible from browser
-        }
-
-        // Load metrics from backend API (ignore errors if backend not reachable)
-        try {
-          const metricsRes = await fetch(`${API_URL}/api/metrics`, { 
-            signal: AbortSignal.timeout(5000) 
-          });
-          if (metricsRes.ok) {
-            const metricsData = await metricsRes.json();
-            if (isMounted) {
-              setMetrics(metricsData);
-            }
-          }
-        } catch (e) {
-          // Silently fail - backend might not be accessible from browser
-        }
-      } catch (e) {
-        console.error('Failed to load schema:', e);
-      } finally {
-        if (isMounted) {
-          setIsLoading(false);
-        }
+      } catch {
+        setCubeStatus('error');
       }
     };
-    
-    loadSchema();
-    
-    return () => {
-      isMounted = false;
-    };
+    checkCubeStatus();
   }, []);
 
-  // Separate function to manually reload
-  const reloadSchema = useCallback(async () => {
-    setIsLoading(true);
+  const handleTestConnection = async (id: string) => {
+    setTestingId(id);
     try {
-      const tablesResult = await duckDB.query(`
-        SELECT table_name FROM information_schema.tables 
-        WHERE table_schema = 'main' ORDER BY table_name
-      `);
-      
-      const tableSchemas: TableSchema[] = [];
-      
-      for (const row of tablesResult.rows) {
-        const tableName = row[0] as string;
-        const columnsResult = await duckDB.query(`
-          SELECT column_name, data_type
-          FROM information_schema.columns
-          WHERE table_name = '${tableName}'
-          ORDER BY ordinal_position
-        `);
-        
-        tableSchemas.push({
-          name: tableName,
-          columns: columnsResult.rows.map(col => ({
-            name: col[0] as string,
-            type: col[1] as string,
-          })),
-        });
-      }
-      
-      setTables(tableSchemas);
-    } catch (e) {
-      console.error('Failed to reload schema:', e);
+      const result = await testConnection(id);
+      setTestResults(prev => ({ ...prev, [id]: result }));
+    } catch (err: any) {
+      setTestResults(prev => ({ ...prev, [id]: { success: false, error: err.message } }));
     } finally {
-      setIsLoading(false);
+      setTestingId(null);
     }
-  }, []);
+  };
 
-  // Add relationship via backend API
-  const addRelationship = async (rel: { fromTable: string; fromColumn: string; toTable: string; toColumn: string; type: string }) => {
-    try {
-      const res = await fetch(`${API_URL}/api/relationships`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          from_table: rel.fromTable,
-          from_column: rel.fromColumn,
-          to_table: rel.toTable,
-          to_column: rel.toColumn,
-          relationship_type: rel.type,
-        }),
-      });
-      if (res.ok) {
-        const newRel = await res.json();
-        setRelationships([...relationships, newRel]);
+  const handleDeleteConnection = async (id: string) => {
+    if (confirm('Are you sure you want to delete this connection?')) {
+      try {
+        await deleteConnection(id);
+      } catch (err: any) {
+        alert(err.message);
       }
-    } catch (e) {
-      console.error('Failed to add relationship:', e);
-    }
-    setShowRelationshipModal(false);
-  };
-
-  // Remove relationship via backend API
-  const removeRelationship = async (id: number) => {
-    try {
-      await fetch(`${API_URL}/api/relationships/${id}`, { method: 'DELETE' });
-      setRelationships(relationships.filter(r => r.id !== id));
-    } catch (e) {
-      console.error('Failed to remove relationship:', e);
     }
   };
 
-  // Add metric via backend API
-  const addMetric = async (metric: Omit<Metric, 'id'>) => {
+  const handleActivateConnection = async (id: string) => {
     try {
-      const res = await fetch(`${API_URL}/api/metrics`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(metric),
-      });
-      if (res.ok) {
-        const newMetric = await res.json();
-        setMetrics([...metrics, newMetric]);
+      await activateConnection(id);
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const handleAddConnection = async (input: ConnectionInput) => {
+    try {
+      await createConnection(input);
+      setShowAddModal(false);
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const getStatusBadge = (conn: Connection) => {
+    const testResult = testResults[conn.id];
+
+    if (testResult) {
+      if (testResult.success) {
+        return (
+          <span className="flex items-center gap-1 text-xs text-emerald-400">
+            <span className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
+            Connected
+          </span>
+        );
+      } else {
+        return (
+          <span className="flex items-center gap-1 text-xs text-red-400" title={testResult.error}>
+            <span className="w-2 h-2 bg-red-400 rounded-full" />
+            Error
+          </span>
+        );
       }
-    } catch (e) {
-      console.error('Failed to add metric:', e);
     }
-    setShowMetricModal(false);
-  };
 
-  // Remove metric via backend API
-  const removeMetric = async (id: number) => {
-    try {
-      await fetch(`${API_URL}/api/metrics/${id}`, { method: 'DELETE' });
-      setMetrics(metrics.filter(m => m.id !== id));
-    } catch (e) {
-      console.error('Failed to remove metric:', e);
+    if (conn.is_active) {
+      return (
+        <span className="flex items-center gap-1 text-xs text-emerald-400">
+          <span className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
+          Active
+        </span>
+      );
     }
+
+    return (
+      <span className="flex items-center gap-1 text-xs text-zinc-500">
+        <span className="w-2 h-2 bg-zinc-500 rounded-full" />
+        Inactive
+      </span>
+    );
   };
 
-  // Generate AI descriptions for a table
-  const [generatingTables, setGeneratingTables] = useState<Set<string>>(new Set());
-  
-  const generateAIDescriptions = async (table: TableSchema) => {
-    setGeneratingTables(prev => new Set(prev).add(table.name));
-    try {
-      const res = await fetch(`${API_URL}/api/ai/describe-columns`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          table_name: table.name,
-          columns: table.columns.map(c => ({ name: c.name, type: c.type })),
-        }),
-      });
-      
-      if (!res.ok) {
-        const error = await res.json();
-        alert(error.error || 'Failed to generate descriptions');
-        return;
-      }
-      
-      const data = await res.json();
-      
-      // Update column metadata with AI suggestions
-      for (const col of data.columns || []) {
-        const key = `${table.name}.${col.name}`;
-        setColumnMetadata(prev => ({
-          ...prev,
-          [key]: {
-            table_name: table.name,
-            column_name: col.name,
-            description: col.description || '',
-            alias: col.alias || '',
-          },
-        }));
-        
-        // Save to backend
-        await fetch(`${API_URL}/api/metadata/columns`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            table_name: table.name,
-            column_name: col.name,
-            description: col.description || '',
-            alias: col.alias || '',
-          }),
-        });
-      }
-    } catch (e) {
-      console.error('Failed to generate AI descriptions:', e);
-      alert('Failed to generate descriptions');
-    } finally {
-      setGeneratingTables(prev => {
-        const next = new Set(prev);
-        next.delete(table.name);
-        return next;
-      });
-    }
-  };
-
-  const getTypeColor = (type: string) => {
-    const t = type.toLowerCase();
-    if (t.includes('int') || t.includes('decimal') || t.includes('float')) return 'text-blue-400';
-    if (t.includes('varchar') || t.includes('text') || t.includes('char')) return 'text-green-400';
-    if (t.includes('date') || t.includes('time')) return 'text-purple-400';
-    if (t.includes('bool')) return 'text-orange-400';
-    return 'text-zinc-400';
-  };
-
-  const selectedTableData = tables.find(t => t.name === selectedTable);
-
-
-  return (
-    <div className="min-h-screen bg-zinc-950 text-white flex">
-      {/* Sidebar */}
-      <div className="w-56 border-r border-zinc-800 flex flex-col">
-        <div className="p-4 border-b border-zinc-800">
-          <Link href="/canvas" className="text-zinc-400 hover:text-white transition-colors text-sm">
-            ← Canvas
-          </Link>
-        </div>
-        
-        <nav className="flex-1 p-2">
-          <button
-            onClick={() => setActiveTab('schema')}
-            className={`w-full px-3 py-2 rounded-md text-left text-sm flex items-center gap-2 transition-colors ${
-              activeTab === 'schema'
-                ? 'bg-zinc-800 text-white'
-                : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-white'
-            }`}
-          >
-            <svg className="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
-            </svg>
-            Data Model
-            {tables.length > 0 && (
-              <span className="ml-auto text-xs bg-zinc-700 px-1.5 py-0.5 rounded">{tables.length}</span>
-            )}
-          </button>
-          
-          <button
-            onClick={() => setActiveTab('metrics')}
-            className={`w-full px-3 py-2 rounded-md text-left text-sm flex items-center gap-2 transition-colors mt-1 ${
-              activeTab === 'metrics'
-                ? 'bg-zinc-800 text-white'
-                : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-white'
-            }`}
-          >
-            <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-            </svg>
-            Metrics
-            {metrics.length > 0 && (
-              <span className="ml-auto text-xs bg-zinc-700 px-1.5 py-0.5 rounded">{metrics.length}</span>
-            )}
-          </button>
-        </nav>
-
-        <div className="p-2 border-t border-zinc-800">
-          <button
-            onClick={reloadSchema}
-            className="w-full px-3 py-2 text-sm text-zinc-400 hover:text-white hover:bg-zinc-800/50 rounded-md transition-colors flex items-center gap-2"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            Refresh
-          </button>
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-white flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-zinc-400">Loading connections...</p>
         </div>
       </div>
+    );
+  }
 
-      {/* Main Content */}
-      <div className="flex-1 overflow-auto">
-        <div className="max-w-4xl p-6 space-y-6">
-          {isLoading ? (
-            <div className="text-center py-12 text-zinc-500">Loading...</div>
-          ) : activeTab === 'schema' ? (
-            <>
-              {/* Schema Tab - Tables */}
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-semibold">Tables & Relationships</h2>
+  return (
+    <div className="min-h-screen bg-zinc-950 text-white">
+      <div className="max-w-5xl mx-auto p-8">
+        {/* Header */}
+        <div className="mb-8">
+          <Link href="/canvas" className="text-zinc-400 hover:text-white transition-colors text-sm mb-4 inline-block">
+            ← Back to Canvas
+          </Link>
+          <h1 className="text-3xl font-bold mb-2">Data Connections</h1>
+          <p className="text-zinc-400">Manage your PostgreSQL database connections</p>
+        </div>
+
+        {/* Error Banner */}
+        {error && (
+          <div className="bg-red-950/20 border border-red-900/30 rounded-lg p-4 mb-6">
+            <p className="text-red-400">{error}</p>
+            <button onClick={() => fetchConnections()} className="text-sm text-red-300 underline mt-2">
+              Retry
+            </button>
+          </div>
+        )}
+
+        {/* Cube.js Status */}
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 mb-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-gradient-to-br from-orange-500 to-red-500 rounded-lg flex items-center justify-center">
+                <svg className="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5z" />
+                </svg>
               </div>
+              <div>
+                <h3 className="font-semibold">Cube.js Semantic Layer</h3>
+                <p className="text-sm text-zinc-400">
+                  {cubeStatus === 'connected' && 'Running on localhost:4545'}
+                  {cubeStatus === 'error' && 'Not connected'}
+                  {cubeStatus === 'loading' && 'Checking connection...'}
+                </p>
+              </div>
+            </div>
+            <div>
+              {cubeStatus === 'connected' ? (
+                <span className="flex items-center gap-2 text-emerald-400">
+                  <span className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
+                  Active
+                </span>
+              ) : cubeStatus === 'error' ? (
+                <span className="flex items-center gap-2 text-red-400">
+                  <span className="w-2 h-2 bg-red-400 rounded-full" />
+                  Offline
+                </span>
+              ) : (
+                <span className="text-zinc-500">Loading...</span>
+              )}
+            </div>
+          </div>
+        </div>
 
-              {tables.map(table => (
-                <div key={table.name} className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
-                  <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between bg-zinc-900/50">
-                    <div className="flex items-center gap-2">
-                      <svg className="w-5 h-5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                      </svg>
-                      <span className="font-semibold text-lg">{table.name}</span>
-                      <span className="text-xs text-zinc-500 bg-zinc-800 px-2 py-0.5 rounded">{table.columns.length} cols</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => generateAIDescriptions(table)}
-                        disabled={generatingTables.has(table.name)}
-                        className="text-xs px-2 py-1 rounded bg-gradient-to-r from-purple-600/20 to-pink-600/20 border border-purple-500/30 text-purple-300 hover:border-purple-400 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 transition-all"
-                      >
-                        {generatingTables.has(table.name) ? (
-                          <>
-                            <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                            </svg>
-                            Generating...
-                          </>
-                        ) : (
-                          <>
-                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
-                            </svg>
-                            AI Describe
-                          </>
+        {/* Connections List */}
+        <div className="mb-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold">PostgreSQL Connections</h2>
+            <button
+              onClick={() => setShowAddModal(true)}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors flex items-center gap-2"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              Add Connection
+            </button>
+          </div>
+
+          <div className="space-y-3">
+            {connections.map(conn => (
+              <div
+                key={conn.id}
+                className={`bg-zinc-900 border rounded-lg p-4 transition-colors ${
+                  conn.is_active ? 'border-indigo-500/50 bg-indigo-950/10' : 'border-zinc-800 hover:border-zinc-700'
+                }`}
+              >
+                <div className="flex items-start justify-between">
+                  <div className="flex items-start gap-3 flex-1">
+                    <div className="text-2xl mt-1">🐘</div>
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-1">
+                        <h3 className="font-semibold">{conn.name}</h3>
+                        {conn.is_demo && (
+                          <span className="px-2 py-0.5 text-xs bg-amber-500/20 text-amber-400 rounded">
+                            Demo
+                          </span>
                         )}
-                      </button>
-                      <button
-                        onClick={() => { setSelectedTable(table.name); setShowRelationshipModal(true); }}
-                        className="text-xs text-zinc-400 hover:text-white"
-                      >
-                        + Relationship
-                      </button>
+                        {getStatusBadge(conn)}
+                      </div>
+                      <div className="text-sm text-zinc-400 space-y-1">
+                        <div className="flex items-center gap-4">
+                          <span className="flex items-center gap-1">
+                            <span className="text-zinc-600">Host:</span>
+                            {conn.host}:{conn.port}
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <span className="text-zinc-600">Database:</span>
+                            {conn.database_name}
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <span className="text-zinc-600">User:</span>
+                            {conn.username}
+                          </span>
+                        </div>
+                      </div>
                     </div>
                   </div>
-
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-zinc-800 text-zinc-500">
-                        <th className="text-left px-4 py-2 font-medium w-1/4">Column</th>
-                        <th className="text-left px-4 py-2 font-medium w-1/6">Type</th>
-                        <th className="text-left px-4 py-2 font-medium">Description</th>
-                        <th className="text-left px-4 py-2 font-medium w-1/6">Alias</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {table.columns.map(col => {
-                        const metaKey = `${table.name}.${col.name}`;
-                        const meta = columnMetadata[metaKey] || {};
-                        return (
-                          <tr key={col.name} className="border-b border-zinc-800/30 hover:bg-zinc-800/20">
-                            <td className="px-4 py-2 font-mono">{col.name}</td>
-                            <td className={`px-4 py-2 ${getTypeColor(col.type)}`}>{col.type}</td>
-                            <td className="px-4 py-2">
-                              <input
-                                type="text"
-                                placeholder="..."
-                                defaultValue={meta.description || ''}
-                                onChange={(e) => saveColumnMetadata(table.name, col.name, 'description', e.target.value)}
-                                className="w-full bg-transparent text-zinc-400 placeholder-zinc-700 focus:outline-none focus:text-white"
-                              />
-                            </td>
-                            <td className="px-4 py-2">
-                              <input
-                                type="text"
-                                placeholder="..."
-                                defaultValue={meta.alias || ''}
-                                onChange={(e) => saveColumnMetadata(table.name, col.name, 'alias', e.target.value)}
-                                className="w-full bg-transparent text-zinc-400 placeholder-zinc-700 focus:outline-none focus:text-white"
-                              />
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-
-                  {relationships.filter(r => r.from_table === table.name || r.to_table === table.name).length > 0 && (
-                    <div className="px-4 py-2 border-t border-zinc-800 bg-zinc-950/50">
-                      <div className="flex flex-wrap gap-2">
-                        {relationships
-                          .filter(r => r.from_table === table.name || r.to_table === table.name)
-                          .map(rel => (
-                            <div key={rel.id} className="flex items-center gap-1 text-xs bg-zinc-800 px-2 py-1 rounded">
-                              <span className="text-zinc-400">{rel.from_table}.{rel.from_column}</span>
-                              <span className="text-zinc-600">→</span>
-                              <span className="text-zinc-400">{rel.to_table}.{rel.to_column}</span>
-                              <button
-                                onClick={() => removeRelationship(rel.id)}
-                                className="ml-1 text-zinc-600 hover:text-red-400"
-                              >
-                                ×
-                              </button>
-                            </div>
-                          ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
-
-              {tables.length === 0 && (
-                <div className="text-center py-12 text-zinc-500">
-                  No tables found. Upload data on the canvas first.
-                </div>
-              )}
-            </>
-          ) : (
-            <>
-              {/* Metrics Tab */}
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-semibold">Fields</h2>
-                <button
-                  onClick={() => setShowMetricModal(true)}
-                  className="px-3 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-500 rounded transition-colors"
-                >
-                  + Add Metric
-                </button>
-              </div>
-
-              {metrics.length === 0 ? (
-                <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-8 text-center">
-                  {/* <svg className="w-12 h-12 text-zinc-700 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-                  </svg> */}
-                  <p className="text-zinc-500 text-sm">No calculated fields yet.</p>
-                  <p className="text-zinc-600 text-xs mt-1">Create metrics like <code className="bg-zinc-800 px-1 rounded">SUM(orders.total)</code></p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {metrics.map(metric => (
-                    <div key={metric.id} className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 flex items-start justify-between hover:bg-zinc-800/30 transition-colors">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="font-medium">{metric.display_name || metric.name}</span>
-                          <span className={`text-xs px-1.5 py-0.5 rounded ${metric.metric_type === 'measure' ? 'bg-blue-900/30 text-blue-400' : 'bg-purple-900/30 text-purple-400'}`}>
-                            {metric.metric_type}
-                          </span>
-                          <span className="text-xs text-zinc-600">on {metric.table_name}</span>
-                        </div>
-                        <code className="text-sm text-zinc-500 font-mono">{metric.expression}</code>
-                        {metric.description && (
-                          <p className="text-xs text-zinc-600 mt-1">{metric.description}</p>
-                        )}
-                      </div>
+                  <div className="flex items-center gap-2">
+                    {!conn.is_active && (
                       <button
-                        onClick={() => removeMetric(metric.id)}
-                        className="text-zinc-600 hover:text-red-400 p-1"
+                        onClick={() => handleActivateConnection(conn.id)}
+                        className="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded transition-colors"
+                      >
+                        Set Active
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleTestConnection(conn.id)}
+                      disabled={testingId === conn.id}
+                      className="px-3 py-1.5 text-sm bg-zinc-800 hover:bg-zinc-700 rounded transition-colors disabled:opacity-50"
+                    >
+                      {testingId === conn.id ? 'Testing...' : 'Test'}
+                    </button>
+                    {!conn.is_demo && (
+                      <button
+                        onClick={() => handleDeleteConnection(conn.id)}
+                        className="p-1.5 text-zinc-500 hover:text-red-400 transition-colors"
+                        title="Delete connection"
                       >
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                         </svg>
                       </button>
-                    </div>
-                  ))}
+                    )}
+                  </div>
                 </div>
-              )}
-            </>
+              </div>
+            ))}
+          </div>
+
+          {connections.length === 0 && (
+            <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-12 text-center">
+              <svg className="w-16 h-16 text-zinc-700 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
+              </svg>
+              <h3 className="text-lg font-medium text-zinc-400 mb-2">No connections yet</h3>
+              <p className="text-sm text-zinc-600 mb-4">Add your first database connection to get started</p>
+              <button
+                onClick={() => setShowAddModal(true)}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors"
+              >
+                Add Connection
+              </button>
+            </div>
           )}
         </div>
-      </div>
 
-      {/* Relationship Modal */}
-      {showRelationshipModal && (
-        <RelationshipModal
-          tables={tables}
-          defaultFromTable={selectedTable || ''}
-          onClose={() => setShowRelationshipModal(false)}
-          onSave={addRelationship}
-        />
-      )}
-
-      {/* Metric Modal */}
-      {showMetricModal && (
-        <MetricModal
-          tables={tables}
-          onClose={() => setShowMetricModal(false)}
-          onSave={addMetric}
-        />
-      )}
-    </div>
-  );
-}
-
-// Relationship Modal Component
-function RelationshipModal({
-  tables,
-  defaultFromTable,
-  onClose,
-  onSave,
-}: {
-  tables: TableSchema[];
-  defaultFromTable: string;
-  onClose: () => void;
-  onSave: (rel: { fromTable: string; fromColumn: string; toTable: string; toColumn: string; type: string }) => void;
-}) {
-  const [fromTable, setFromTable] = useState(defaultFromTable);
-  const [fromColumn, setFromColumn] = useState('');
-  const [toTable, setToTable] = useState('');
-  const [toColumn, setToColumn] = useState('');
-  const [relType, setRelType] = useState<'one-to-one' | 'one-to-many' | 'many-to-many'>('one-to-many');
-
-  const fromTableData = tables.find(t => t.name === fromTable);
-  const toTableData = tables.find(t => t.name === toTable);
-
-  const handleSave = () => {
-    if (fromTable && fromColumn && toTable && toColumn) {
-      onSave({ fromTable, fromColumn, toTable, toColumn, type: relType });
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-zinc-900 border border-zinc-800 rounded-lg w-[500px] max-w-full">
-        <div className="px-6 py-4 border-b border-zinc-800 flex items-center justify-between">
-          <h3 className="font-semibold">Add Relationship</h3>
-          <button onClick={onClose} className="text-zinc-400 hover:text-white">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+        {/* Info Box */}
+        <div className="bg-blue-950/20 border border-blue-900/30 rounded-lg p-4">
+          <div className="flex gap-3">
+            <svg className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-          </button>
-        </div>
-        
-        <div className="p-6 space-y-4">
-          {/* From */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm text-zinc-400 mb-1">From Table</label>
-              <select
-                value={fromTable}
-                onChange={e => { setFromTable(e.target.value); setFromColumn(''); }}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
-              >
-                <option value="">Select table</option>
-                {tables.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm text-zinc-400 mb-1">Column</label>
-              <select
-                value={fromColumn}
-                onChange={e => setFromColumn(e.target.value)}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
-                disabled={!fromTableData}
-              >
-                <option value="">Select column</option>
-                {fromTableData?.columns.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
-              </select>
+            <div className="text-sm text-blue-300">
+              <p className="font-medium mb-1">About Database Connections</p>
+              <p className="text-blue-300/80">
+                The <strong>active connection</strong> is used for schema introspection and semantic layer queries.
+                Define your data model, metrics, and relationships in the <Link href="/model" className="underline hover:text-blue-200">Model</Link> page.
+              </p>
             </div>
           </div>
-
-          {/* Relationship Type */}
-          <div>
-            <label className="block text-sm text-zinc-400 mb-1">Relationship Type</label>
-            <select
-              value={relType}
-              onChange={e => setRelType(e.target.value as typeof relType)}
-              className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
-            >
-              <option value="one-to-one">One to One</option>
-              <option value="one-to-many">One to Many</option>
-              <option value="many-to-many">Many to Many</option>
-            </select>
-          </div>
-
-          {/* To */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm text-zinc-400 mb-1">To Table</label>
-              <select
-                value={toTable}
-                onChange={e => { setToTable(e.target.value); setToColumn(''); }}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
-              >
-                <option value="">Select table</option>
-                {tables.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm text-zinc-400 mb-1">Column</label>
-              <select
-                value={toColumn}
-                onChange={e => setToColumn(e.target.value)}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
-                disabled={!toTableData}
-              >
-                <option value="">Select column</option>
-                {toTableData?.columns.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
-              </select>
-            </div>
-          </div>
-        </div>
-
-        <div className="px-6 py-4 border-t border-zinc-800 flex justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-sm text-zinc-400 hover:text-white"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={!fromTable || !fromColumn || !toTable || !toColumn}
-            className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Save Relationship
-          </button>
         </div>
       </div>
+
+      {/* Add Connection Modal */}
+      {showAddModal && (
+        <AddConnectionModal
+          onClose={() => setShowAddModal(false)}
+          onSave={handleAddConnection}
+        />
+      )}
     </div>
   );
 }
 
-// Metric Modal Component
-function MetricModal({
-  tables,
+function AddConnectionModal({
   onClose,
   onSave,
 }: {
-  tables: TableSchema[];
   onClose: () => void;
-  onSave: (metric: Omit<Metric, 'id'>) => void;
+  onSave: (input: ConnectionInput) => void;
 }) {
   const [name, setName] = useState('');
-  const [displayName, setDisplayName] = useState('');
-  const [description, setDescription] = useState('');
-  const [tableName, setTableName] = useState('');
-  const [expression, setExpression] = useState('');
-  const [metricType, setMetricType] = useState<'measure' | 'dimension'>('measure');
+  const [host, setHost] = useState('');
+  const [port, setPort] = useState('5432');
+  const [database_name, setDatabaseName] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [ssl, setSsl] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
-  const handleSave = () => {
-    if (name && tableName && expression) {
-      onSave({
-        name,
-        display_name: displayName || name,
-        description,
-        table_name: tableName,
-        expression,
-        metric_type: metricType,
-      });
+  const handleSave = async () => {
+    if (name && host && database_name && username) {
+      setIsSaving(true);
+      try {
+        await onSave({
+          name,
+          host,
+          port: parseInt(port) || 5432,
+          database_name,
+          username,
+          password: password || undefined,
+          ssl,
+        });
+      } finally {
+        setIsSaving(false);
+      }
     }
   };
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-zinc-900 border border-zinc-800 rounded-lg w-[550px] max-w-full">
-        <div className="px-6 py-4 border-b border-zinc-800 flex items-center justify-between">
-          <h3 className="font-semibold">Add Calculated Field</h3>
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg w-[600px] max-w-full max-h-[90vh] overflow-auto">
+        <div className="px-6 py-4 border-b border-zinc-800 flex items-center justify-between sticky top-0 bg-zinc-900">
+          <h3 className="text-xl font-semibold">Add PostgreSQL Connection</h3>
           <button onClick={onClose} className="text-zinc-400 hover:text-white">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
-        
+
         <div className="p-6 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm text-zinc-400 mb-1">Name *</label>
-              <input
-                type="text"
-                value={name}
-                onChange={e => setName(e.target.value)}
-                placeholder="total_revenue"
-                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-zinc-400 mb-1">Display Name</label>
-              <input
-                type="text"
-                value={displayName}
-                onChange={e => setDisplayName(e.target.value)}
-                placeholder="Total Revenue"
-                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm text-zinc-400 mb-1">Base Table *</label>
-              <select
-                value={tableName}
-                onChange={e => setTableName(e.target.value)}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
-              >
-                <option value="">Select table</option>
-                {tables.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm text-zinc-400 mb-1">Type</label>
-              <select
-                value={metricType}
-                onChange={e => setMetricType(e.target.value as 'measure' | 'dimension')}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
-              >
-                <option value="measure">Measure (aggregate)</option>
-                <option value="dimension">Dimension (calculated)</option>
-              </select>
-            </div>
-          </div>
-
           <div>
-            <label className="block text-sm text-zinc-400 mb-1">Expression *</label>
-            <textarea
-              value={expression}
-              onChange={e => setExpression(e.target.value)}
-              placeholder="SUM(orders.total)"
-              rows={3}
-              className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm font-mono"
-            />
-            <p className="text-xs text-zinc-500 mt-1">
-              Use SQL expressions. Reference columns as <code className="bg-zinc-800 px-1 rounded">table.column</code>
-            </p>
-          </div>
-
-          <div>
-            <label className="block text-sm text-zinc-400 mb-1">Description</label>
+            <label className="block text-sm font-medium text-zinc-400 mb-2">Connection Name *</label>
             <input
               type="text"
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-              placeholder="Sum of all order totals"
-              className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm"
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder="My Production Database"
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2.5 focus:outline-none focus:border-indigo-500"
             />
+          </div>
+
+          <div className="grid grid-cols-3 gap-4">
+            <div className="col-span-2">
+              <label className="block text-sm font-medium text-zinc-400 mb-2">Host *</label>
+              <input
+                type="text"
+                value={host}
+                onChange={e => setHost(e.target.value)}
+                placeholder="localhost or 192.168.1.100"
+                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2.5 focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-zinc-400 mb-2">Port</label>
+              <input
+                type="text"
+                value={port}
+                onChange={e => setPort(e.target.value)}
+                placeholder="5432"
+                className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2.5 focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-zinc-400 mb-2">Database Name *</label>
+            <input
+              type="text"
+              value={database_name}
+              onChange={e => setDatabaseName(e.target.value)}
+              placeholder="mydb"
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2.5 focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-zinc-400 mb-2">Username *</label>
+            <input
+              type="text"
+              value={username}
+              onChange={e => setUsername(e.target.value)}
+              placeholder="postgres"
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2.5 focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-zinc-400 mb-2">Password</label>
+            <input
+              type="password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="••••••••"
+              className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2.5 focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              id="ssl"
+              checked={ssl}
+              onChange={e => setSsl(e.target.checked)}
+              className="w-4 h-4 bg-zinc-800 border border-zinc-700 rounded"
+            />
+            <label htmlFor="ssl" className="text-sm text-zinc-400">
+              Use SSL connection
+            </label>
+          </div>
+
+          <div className="bg-amber-950/20 border border-amber-900/30 rounded-lg p-3">
+            <div className="flex gap-2">
+              <svg className="w-5 h-5 text-amber-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+              <p className="text-sm text-amber-300/90">
+                Connection credentials are encrypted and stored securely. Make sure your database is accessible from this machine.
+              </p>
+            </div>
           </div>
         </div>
 
-        <div className="px-6 py-4 border-t border-zinc-800 flex justify-end gap-2">
+        <div className="px-6 py-4 border-t border-zinc-800 flex justify-end gap-3 sticky bottom-0 bg-zinc-900">
           <button
             onClick={onClose}
-            className="px-4 py-2 text-sm text-zinc-400 hover:text-white"
+            className="px-4 py-2 text-zinc-400 hover:text-white transition-colors"
           >
             Cancel
           </button>
           <button
             onClick={handleSave}
-            disabled={!name || !tableName || !expression}
-            className="px-4 py-2 text-sm bg-emerald-600 hover:bg-emerald-500 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={!name || !host || !database_name || !username || isSaving}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
-            Create Metric
+            {isSaving ? 'Adding...' : 'Add Connection'}
           </button>
         </div>
       </div>

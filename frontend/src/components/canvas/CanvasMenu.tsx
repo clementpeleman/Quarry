@@ -2,15 +2,31 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
+import { useCanvas, CanvasListItem } from '@/lib/canvas/store';
 
 interface CanvasMenuProps {
   onAddNode?: (type: 'sqlCell' | 'textCell' | 'chartCell') => void;
   onFileUpload?: (file: File) => void;
+  onLoadCanvas?: (canvasData: { nodes: any[]; edges: any[] }) => void;
+  activeConnectionId?: string;
 }
 
-export default function CanvasMenu({ onAddNode, onFileUpload }: CanvasMenuProps) {
+export default function CanvasMenu({ onAddNode, onFileUpload, onLoadCanvas, activeConnectionId }: CanvasMenuProps) {
+  const {
+    canvases,
+    currentCanvasId,
+    currentCanvasName,
+    loadCanvas,
+    createCanvas,
+    deleteCanvas,
+    renameCanvas,
+  } = useCanvas();
+
   const [isOpen, setIsOpen] = useState(false);
   const [isAddOpen, setIsAddOpen] = useState(false);
+  const [isCanvasOpen, setIsCanvasOpen] = useState(false);
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [newName, setNewName] = useState('');
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -20,18 +36,131 @@ export default function CanvasMenu({ onAddNode, onFileUpload }: CanvasMenuProps)
     event.target.value = '';
   };
 
+  const handleCanvasSelect = async (canvas: CanvasListItem) => {
+    try {
+      const data = await loadCanvas(canvas.id);
+      onLoadCanvas?.(data);
+      setIsCanvasOpen(false);
+    } catch (err) {
+      console.error('Failed to load canvas:', err);
+    }
+  };
+
+  const handleNewCanvas = async () => {
+    try {
+      await createCanvas('Untitled Canvas', activeConnectionId);
+      onLoadCanvas?.({ nodes: [], edges: [] });
+      setIsCanvasOpen(false);
+    } catch (err) {
+      console.error('Failed to create canvas:', err);
+    }
+  };
+
+  const handleDelete = async (id: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (confirm('Delete this canvas?')) {
+      await deleteCanvas(id);
+    }
+  };
+
+  const handleRename = () => {
+    if (newName.trim()) {
+      renameCanvas(newName.trim());
+    }
+    setIsRenaming(false);
+    setNewName('');
+  };
+
   return (
     <div className="absolute top-4 left-4 z-50 flex gap-2">
       {/* Logo / Home */}
-      <Link 
+      <Link
         href="/"
         className="bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 flex items-center gap-2 hover:bg-zinc-800 transition-colors"
       >
-        {/* <svg className="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
-        </svg> */}
         <span className="text-sm font-semibold text-indigo-500">Quarry</span>
       </Link>
+
+      {/* Canvas Selector */}
+      <div className="relative">
+        {isRenaming ? (
+          <div className="bg-zinc-900 border border-zinc-800 rounded-md px-2 py-1 flex items-center gap-1">
+            <input
+              type="text"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleRename()}
+              onBlur={handleRename}
+              placeholder={currentCanvasName}
+              className="bg-transparent text-sm text-white w-32 focus:outline-none"
+              autoFocus
+            />
+          </div>
+        ) : (
+          <button
+            onClick={() => setIsCanvasOpen(!isCanvasOpen)}
+            className="bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 text-sm text-white hover:bg-zinc-800 transition-colors flex items-center gap-2 max-w-[200px]"
+          >
+            <svg className="w-4 h-4 text-zinc-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2" />
+            </svg>
+            <span className="truncate">{currentCanvasName}</span>
+            <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+        )}
+
+        {isCanvasOpen && (
+          <div className="absolute top-full left-0 mt-1 bg-zinc-900 border border-zinc-800 rounded-md shadow-xl min-w-[220px] py-1 max-h-[300px] overflow-y-auto">
+            {/* Current canvas actions */}
+            <div className="px-3 py-2 border-b border-zinc-800">
+              <button
+                onClick={() => { setIsRenaming(true); setNewName(currentCanvasName); setIsCanvasOpen(false); }}
+                className="text-xs text-zinc-400 hover:text-white transition-colors"
+              >
+                Rename
+              </button>
+            </div>
+
+            {/* Canvas list */}
+            {canvases.map((canvas) => (
+              <button
+                key={canvas.id}
+                onClick={() => handleCanvasSelect(canvas)}
+                className={`w-full px-3 py-2 text-left text-sm hover:bg-zinc-800 flex items-center justify-between group ${
+                  canvas.id === currentCanvasId ? 'text-indigo-400' : 'text-white'
+                }`}
+              >
+                <span className="truncate">{canvas.name}</span>
+                {canvas.id !== currentCanvasId && (
+                  <button
+                    onClick={(e) => handleDelete(canvas.id, e)}
+                    className="text-zinc-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </button>
+                )}
+              </button>
+            ))}
+
+            {/* New canvas */}
+            <div className="border-t border-zinc-800 mt-1 pt-1">
+              <button
+                onClick={handleNewCanvas}
+                className="w-full px-3 py-2 text-left text-sm text-zinc-400 hover:text-white hover:bg-zinc-800 flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+                New Canvas
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Add Node Dropdown */}
       <div className="relative">
@@ -124,6 +253,16 @@ export default function CanvasMenu({ onAddNode, onFileUpload }: CanvasMenuProps)
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
               </svg>
               Connections
+            </Link>
+            <Link
+              href="/model"
+              className="block px-3 py-2 text-sm text-white hover:bg-zinc-800 flex items-center gap-2"
+              onClick={() => setIsOpen(false)}
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+              </svg>
+              Data Model
             </Link>
             <div className="border-t border-zinc-800 my-1" />
             <a

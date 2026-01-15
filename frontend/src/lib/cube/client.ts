@@ -93,33 +93,45 @@ export const sqlToCubeQuery = (sql: string): any | null => {
   
   const cubeName = fromMatch[1].charAt(0).toUpperCase() + fromMatch[1].slice(1);
   
-  // Check for COUNT(*)
-  const isCount = lowerSql.includes('count(*)');
-  
   // Build basic query
   const query: any = {};
   
-  if (isCount) {
+  // Check for COUNT(*)
+  if (lowerSql.includes('count(*)')) {
     query.measures = [`${cubeName}.count`];
   }
   
-  // Extract dimensions (columns in SELECT that aren't aggregates)
+  // Extract SELECT clause
   const selectMatch = sql.match(/SELECT\s+(.*?)\s+FROM/i);
   if (selectMatch) {
-    const selectClause = selectMatch[1];
-    const columns = selectClause.split(',').map(c => c.trim());
+    const selectClause = selectMatch[1].trim();
     
-    const dimensions = columns
-      .filter(col => !col.toLowerCase().includes('count') && !col.toLowerCase().includes('sum') && col !== '*')
-      .map(col => {
-        // Remove aliases
-        const cleanCol = col.split(' as ')[0].trim();
-        return `${cubeName}.${cleanCol}`;
-      });
-    
-    if (dimensions.length > 0) {
-      query.dimensions = dimensions;
+    // Handle SELECT *
+    if (selectClause === '*') {
+      // For SELECT *, just use the count measure
+      query.measures = [`${cubeName}.count`];
+    } else {
+      // Extract specific columns
+      const columns = selectClause.split(',').map(c => c.trim());
+      
+      const dimensions = columns
+        .filter(col => !col.toLowerCase().includes('count') && !col.toLowerCase().includes('sum'))
+        .map(col => {
+          // Remove aliases
+          const cleanCol = col.split(' as ')[0].trim();
+          return `${cubeName}.${cleanCol}`;
+        });
+      
+      if (dimensions.length > 0) {
+        query.dimensions = dimensions;
+      }
     }
+  }
+  
+  // Extract LIMIT
+  const limitMatch = lowerSql.match(/limit\s+(\d+)/);
+  if (limitMatch) {
+    query.limit = parseInt(limitMatch[1]);
   }
   
   return Object.keys(query).length > 0 ? query : null;
